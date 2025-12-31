@@ -8,7 +8,6 @@ import matplotlib.cm as cm
 from sklearn.decomposition import PCA
 from skimage.color import hsv2rgb
 
-# 假设 holi4d 是用户自定义的库，保留引用
 import holi4d.utils.basic
 import holi4d.utils.py
 

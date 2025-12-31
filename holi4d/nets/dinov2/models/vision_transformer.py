@@ -18,9 +18,6 @@ from torch.utils.checkpoint import checkpoint
 from torch.nn.init import trunc_normal_
 
 from ..layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
-import sys
-sys.path.append('/group/40075/jiahaolu/vggt_train')
-#from vggt.layers.attention_pi3 import FlashAttention
 
 
 logger = logging.getLogger("dinov2")
