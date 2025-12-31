@@ -57,36 +57,36 @@ Download the pre-trained model weights and place them in the project root (or yo
 
 ## 🚀 Demo
 
-Run the following commands to perform tracking and reconstruction on the provided demo video (`demo_data/elephant.mp4`).
+Run the following commands to perform tracking and reconstruction on the provided demo video (`demo_data/cat.mp4`).
 
 ### 1. First Frame 3D Tracking (`3d_ff`)
 Reconstructs 3D motion based on the first frame.
 ```bash
 python demo.py \
-    --mp4_path demo_data/elephant.mp4 \
+    --mp4_path demo_data/cat.mp4 \
     --mode 3d_ff \
     --Ts -1 \
-    --save_base_dir results/elephant
+    --save_base_dir results/cat
 ```
 
 ### 2. Dense Tracking: Every Pixel, Every Frame (`3d_efep`)
 Performs dense 3D tracking for every pixel across all frames.
 ```bash
 python demo.py \
-    --mp4_path demo_data/elephant.mp4 \
+    --mp4_path demo_data/cat.mp4 \
     --mode 3d_efep \
     --Ts -1 \
-    --save_base_dir results/elephant
+    --save_base_dir results/cat
 ```
 
 ### 3. 2D Tracking (`2d`)
 Performs standard 2D tracking in image space.
 ```bash
 python demo.py \
-    --mp4_path demo_data/elephant.mp4 \
+    --mp4_path demo_data/cat.mp4 \
     --mode 2d \
     --Ts -1 \
-    --save_base_dir results/elephant
+    --save_base_dir results/cat
 ```
 
 ---
@@ -97,12 +97,12 @@ Visualize the dense 4D trajectories and reconstructed scenes using the generated
 
 **Visualize First Frame 3D Tracking:**
 ```bash
-python visualization/vis_3d_ff.py --ply_dir results/elephant/3d_ff_output
+python visualization/vis_3d_ff.py --ply_dir results/cat/3d_ff_output
 ```
 
 **Visualize Dense Tracking (Every Pixel):**
 ```bash
-python visualization/vis_3d_efep.py --ply_dir results/elephant/3d_efep_output
+python visualization/vis_3d_efep.py --ply_dir results/cat/3d_efep_output
 ```
 
 <div align="center">
@@ -125,13 +125,6 @@ If you find **Holi4D** useful for your research or applications, please consider
 
 ```bibtex
 
-@inproceedings{lu2025trackingworld,
-    title={TrackingWorld: World-centric Monocular 3D Tracking of Almost All Pixels},
-    author={Jiahao Lu and Weitao Xiong and Jiacheng Deng and Peng Li and Tianyu Huang and Zhiyang Dou and Cheng Lin and Sai-Kit Yeung and Yuan Liu},
-    booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
-    year={2025},
-    url={https://openreview.net/forum?id=vDV912fa3t}
-}
 ```
 
 ---
