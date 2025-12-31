@@ -99,7 +99,7 @@ def main(
     # --- Argument Parsing ---
     parser = argparse.ArgumentParser()
     parser.add_argument('--ply_dir', type=str, 
-                        default='/group/40075/jiahaolu/cleaned_code/Holi4D/huggingfacespace/Holi4d_demo/parkour', 
+                        default='results/cat/3d_efep_output', 
                         help='Directory containing frame_xx.ply files and trajectory_all_pointmap.npy')
     args = parser.parse_args()
 

@@ -1,1 +1,1 @@
-python ./visualization/vis_3d_efep.py --ply_dir ./results/elephant/3d_efep_output
+python visualization/vis_3d_efep.py --ply_dir results/cat/3d_efep_output

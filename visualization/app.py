@@ -12,16 +12,16 @@ from typing import Tuple
 # Global State
 # ==============================================================================
 
-# 启动 Viser 服务器 (端口 8080)
+# Start Viser server (port 8080)
 global_server = viser.ViserServer(port=8080)
 current_thread = None
 stop_event = threading.Event()
 
 
 # ==============================================================================
-# Helper Functions (保持不变)
+# Helper Functions (Kept as is)
 # ==============================================================================
-# ... (此处省略 remove_radius_outlier_gpu, remove_radius_outlier_open3d, compute_trajectory_colors 函数，与之前一致) ...
+# ... (Omitted remove_radius_outlier_gpu, etc., consistent with previous context) ...
 
 def remove_radius_outlier_open3d(points: np.ndarray, nb_neighbors: int = 30, std_ratio: float = 2.0) -> Tuple[np.ndarray, np.ndarray]:
     pcd = o3d.geometry.PointCloud()
@@ -50,7 +50,7 @@ def compute_trajectory_colors(trajectories: np.ndarray, mask: np.ndarray) -> np.
     return (final_colors * 255).astype(np.uint8)
 
 # ==============================================================================
-# Visualization Logic (后台线程)
+# Visualization Logic (Background Thread)
 # ==============================================================================
 
 def visualization_loop(ply_dir_str: str, max_frames: int, default_downsample: int):
@@ -217,14 +217,14 @@ def visualization_loop(ply_dir_str: str, max_frames: int, default_downsample: in
 def launch_visualization(ply_dir, max_frames, downsample, custom_url):
     global current_thread, stop_event, global_server
     
-    # 1. 停止旧线程
+    # 1. Stop old thread
     if current_thread is not None and current_thread.is_alive():
         stop_event.set()
         current_thread.join()
     
     stop_event.clear()
     
-    # 2. 启动新线程
+    # 2. Start new thread
     current_thread = threading.Thread(
         target=visualization_loop, 
         args=(ply_dir, int(max_frames), int(downsample)),
@@ -232,8 +232,8 @@ def launch_visualization(ply_dir, max_frames, downsample, custom_url):
     )
     current_thread.start()
     
-    # 3. 确定使用的 URL
-    # 如果用户提供了代理 URL，直接使用；否则尝试使用本地地址
+    # 3. Determine URL to use
+    # If user provides a proxy URL, use it; otherwise try local address
     if custom_url and custom_url.strip():
         viser_url = custom_url.strip()
     else:
@@ -242,7 +242,7 @@ def launch_visualization(ply_dir, max_frames, downsample, custom_url):
     
     print(f"Embedding Viser URL: {viser_url}")
     
-    # 4. 返回 iframe
+    # 4. Return iframe
     return f"""
     <div style="width: 100%; height: 600px; border: 1px solid #ccc; border-radius: 8px; overflow: hidden;">
         <iframe src="{viser_url}" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"></iframe>
@@ -263,12 +263,12 @@ with gr.Blocks(title="Holi4D Visualizer", theme=gr.themes.Soft()) as demo:
                 value="./assets/epef"
             )
             
-            # === 新增：代理 URL 输入框 ===
+            # === New: Proxy URL Input ===
             viser_url_input = gr.Textbox(
                 label="Viser Proxy URL (Required for Remote Server)", 
                 placeholder="Paste the https://.../proxy/8080/ link here",
                 value="",
-                info="如果你在远程服务器，请粘贴 8080 端口的代理链接（包含 ?websocket=...）"
+                info="If on a remote server, paste the proxy link for port 8080 (including ?websocket=...)"
             )
             
             with gr.Row():
@@ -278,10 +278,10 @@ with gr.Blocks(title="Holi4D Visualizer", theme=gr.themes.Soft()) as demo:
             btn_launch = gr.Button("🚀 Launch Visualization", variant="primary")
             
             gr.Markdown("""
-            ### 使用说明:
-            1. 输入数据文件夹路径。
-            2. **关键步骤**：将你得到的 `https://.../proxy/8080/?websocket=...` 链接粘贴到 **Viser Proxy URL** 框中。
-            3. 点击 Launch。
+            ### Instructions:
+            1. Enter the data directory path.
+            2. **Key Step**: Paste the `https://.../proxy/8080/?websocket=...` link you obtained into the **Viser Proxy URL** box.
+            3. Click Launch.
             """)
 
         with gr.Column(scale=3):
@@ -295,5 +295,5 @@ with gr.Blocks(title="Holi4D Visualizer", theme=gr.themes.Soft()) as demo:
 
 if __name__ == "__main__":
     print("Starting Gradio...")
-    # 允许所有 IP 访问 Gradio，以便你能打开网页
+    # Allow all IPs to access Gradio so you can open the webpage
     demo.launch(server_name="0.0.0.0", server_port=7860)

@@ -40,11 +40,12 @@ cd Holi4D
 ```
 
 ### 2. Environment Setup
-We provide an installation script tested with **CUDA 12.1** and **Python 3.12**.
+We provide an installation script tested with **CUDA 12.1** and **Python 3.11**.
 
 ```bash
-conda create -n holi4d python=3.12
+conda create -n holi4d python=3.11
 conda activate holi4d
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 ```
 

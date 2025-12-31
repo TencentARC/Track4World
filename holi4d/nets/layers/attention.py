@@ -57,20 +57,7 @@ class Attention(nn.Module):
         if self.rope is not None:
             q = self.rope(q, pos)
             k = self.rope(k, pos)
-        #print(q.dtype)
-        # q = q.to(torch.bfloat16)
-        # k = k.to(torch.bfloat16)
-        # v = v.to(torch.bfloat16)
         if self.fused_attn:
-        #     if q.dtype == torch.bfloat16:
-        #         with nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-        #             #print("Kernel before call:")
-        #             x = F.scaled_dot_product_attention(q, k, v)
-        #             #print("Kernel after call:")
-                    
-        #     else:
-        #         with nn.attention.sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
-        #             x = F.scaled_dot_product_attention(q, k, v)
             x = F.scaled_dot_product_attention(
                 q,
                 k,

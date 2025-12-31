@@ -25,7 +25,7 @@ def main(
     # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description="Holi4D 3D-FF (First Frame) Visualization")
     parser.add_argument('--ply_dir', type=str, 
-                        default=None, 
+                        default='results/cat/3d_ff_output', 
                         help='Directory containing flow_xx.ply and vis_xx.npy files')
     args = parser.parse_args()
 

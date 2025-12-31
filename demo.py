@@ -797,7 +797,7 @@ def main():
     parser = argparse.ArgumentParser(description="Holi4D Demo Script")
     
     # --- Paths and Model Config ---
-    parser.add_argument("--ckpt_init", type=str, default='/group/40075/jiahaolu/MoGe/alltracker/checkpoints/cleaned_model1.pth', help="Path to local checkpoint file (optional)")
+    parser.add_argument("--ckpt_init", type=str, default=None, help="Path to local checkpoint file (optional)")
     parser.add_argument("--mp4_path", type=str, required=True, help="Input MP4 video file path")
     parser.add_argument("--config_path", type=str, default='./holi4d/config/eval/v1.json', help="Path to model config json")
     
