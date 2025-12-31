@@ -1,0 +1,13 @@
+{
+    "model": {
+        "encoder": "dinov2_vitl14",
+        "remap_output": "exp",
+        "intermediate_layers": 4,
+        "dim_upsample": [256, 128, 64],
+        "dim_times_res_block_hidden": 2,
+        "num_res_blocks": 2,
+        "num_tokens_range": [1200, 1200],
+        "last_conv_channels": 32,
+        "last_conv_size": 1
+    }
+}

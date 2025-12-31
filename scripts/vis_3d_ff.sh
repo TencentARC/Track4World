@@ -1,0 +1,1 @@
+python ./visualization/vis_3d_ff.py --ply_dir ./results/elephant/3d_ff_output
