@@ -4,6 +4,8 @@ from os.path import *
 import re
 import cv2
 from scipy.spatial.transform import Rotation
+from typing import List, Dict, Union, Optional, Tuple
+import torch
 
 TAG_CHAR = np.array([202021.25], np.float32)
 
@@ -168,3 +170,90 @@ def read_gen(file_name, pil=False):
     elif ext == '.cam':
         return cam_read(file_name)
     return []
+
+# ==============================================================================
+# Metric Computation Functions
+# ==============================================================================
+
+def compute_optical_flow_metrics(
+    pred_flow: torch.Tensor, 
+    gt_flow: torch.Tensor, 
+    valid_mask: Optional[torch.Tensor] = None
+) -> Dict[str, float]:
+    """
+    Computes 2D Optical Flow metrics (EPE, Accuracy, Outliers).
+    """
+    if pred_flow.dim() == 3:
+        pred_flow = pred_flow.unsqueeze(0)
+        gt_flow = gt_flow.unsqueeze(0)
+        if valid_mask is not None:
+            valid_mask = valid_mask.unsqueeze(0)
+
+    B, H, W, _ = pred_flow.shape
+
+    if valid_mask is None:
+        valid_mask = torch.ones((B, H, W), dtype=torch.bool, device=pred_flow.device)
+    else:
+        valid_mask = valid_mask.squeeze(1).bool()
+
+    # End-Point Error
+    epe = torch.norm(pred_flow - gt_flow, dim=-1)
+
+    epe_valid = epe[valid_mask]
+    gt_valid = gt_flow[valid_mask]
+    gt_norm = torch.norm(gt_valid, dim=-1)
+
+    relative_err = epe_valid / (gt_norm + 1e-8)
+
+    return {
+        "EPE2D": epe_valid.sum().item(),
+        "ACC1_2D": (epe_valid < 1.0).float().sum().item(),
+        "ACC3_2D": (epe_valid < 3.0).float().sum().item(),
+        "Outlier_2D": ((epe_valid > 3.0) & (relative_err > 0.05)).float().sum().item(),
+    }
+
+
+def compute_pc_metrics(
+    pred: torch.Tensor, 
+    gt: torch.Tensor, 
+    valid_mask: torch.Tensor
+) -> Dict[str, float]:
+    """
+    Computes Point Cloud reconstruction metrics.
+    """
+    dist_gt = torch.norm(gt[valid_mask], dim=-1)
+    dist_err = torch.norm(pred[valid_mask] - gt[valid_mask], dim=-1)
+    
+    # Absolute Relative Error
+    abs_rel = (dist_err / (dist_gt + 1e-6)).sum().item()
+
+    dist_pred = torch.norm(pred[valid_mask], dim=-1)
+    
+    # Threshold Accuracy
+    threshold_1 = (dist_err < 0.25 * torch.minimum(dist_gt, dist_pred)).float().sum().item()
+    
+    return {
+        'abs_rel': abs_rel,
+        'threshold_1': threshold_1
+    }
+
+
+def compute_scene_flow_metrics(
+    pred_flow3d: torch.Tensor, 
+    gt_flow3d: torch.Tensor, 
+    valid_mask: torch.Tensor
+) -> Dict[str, float]:
+    """
+    Computes 3D Scene Flow metrics.
+    """
+    diff = (pred_flow3d - gt_flow3d)[valid_mask]
+    epe3d = torch.norm(diff, dim=-1)
+    gt_norm = torch.norm(gt_flow3d[valid_mask], dim=-1)
+    relative_err = epe3d / (gt_norm + 1e-6)
+
+    return {
+        'EPE3D': epe3d.sum().item(),
+        'Acc3D_strict': ((epe3d < 0.05) | (relative_err < 0.05)).float().sum().item(),
+        'Acc3D_relax': ((epe3d < 0.1) | (relative_err < 0.1)).float().sum().item(),
+        'Outlier': ((epe3d > 0.3) | (relative_err > 0.1)).float().sum().item(),
+    }

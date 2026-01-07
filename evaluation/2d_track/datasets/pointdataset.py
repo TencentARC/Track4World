@@ -190,10 +190,21 @@ class PointDataset(torch.utils.data.Dataset):
         res_delta = self.resize_delta * augscale
 
         for s in range(S):
+            # Apply temporal jitter/shift starting from the second frame (s > 0)
             if s > 0:
-                sdx = (sdx * 0.8 + np.random.uniform(-res_delta, res_delta) * 0.2) if s > 1 else np.random.uniform(-res_delta, res_delta)
-                sdy = (sdy * 0.8 + np.random.uniform(-res_delta, res_delta) * 0.2) if s > 1 else np.random.uniform(-res_delta, res_delta)
-            
+                # Generate new random displacement within range [-res_delta, res_delta]
+                noise_x = np.random.uniform(-res_delta, res_delta)
+                noise_y = np.random.uniform(-res_delta, res_delta)
+
+                if s > 1:
+                    # Smooth the transition (80% previous direction, 20% new random noise)
+                    sdx = sdx * 0.8 + noise_x * 0.2
+                    sdy = sdy * 0.8 + noise_y * 0.2
+                else:
+                    # For the very first transition, initialize with pure random noise
+                    sdx = noise_x
+                    sdy = noise_y
+                        
             sx, sy = np.clip(sx + sdx, 0.2, 2.0), np.clip(sy + sdy, 0.2, 2.0)
             
             # Keep aspect ratio somewhat sane
@@ -209,7 +220,15 @@ class PointDataset(torch.utils.data.Dataset):
 
         # --- Dynamic Cropping (Pan/Jitter Drift) ---
         # Selects a window that moves slightly per frame
-        mid_x, mid_y = (np.mean(trajs[0, visibles[0] > 0, 0]), np.mean(trajs[0, visibles[0] > 0, 1])) if np.any(visibles[0] > 0) else (crop_size[1], crop_size[0])
+        visible_mask = visibles[0] > 0
+
+        if np.any(visible_mask):
+            # Calculate the centroid (mean X, mean Y) of visible points
+            mid_x = np.mean(trajs[0, visible_mask, 0])
+            mid_y = np.mean(trajs[0, visible_mask, 1])
+        else:
+            # Fallback: Default to image center if no visible points exist
+            mid_y, mid_x = crop_size[0], crop_size[1]
         x0, y0 = int(mid_x - crop_size[1] // 2), int(mid_y - crop_size[0] // 2)
         off_x, off_y = 0, 0
         max_off = int(self.max_crop_offset * augscale)

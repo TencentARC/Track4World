@@ -690,7 +690,7 @@ class SummWriter(object):
         if vals is not None:
             vals = vals[0] # N (assuming B=1 for vals too)
             if vals.shape[0] > N: 
-                 pass 
+                pass 
 
         trajs_np = trajs.long().detach().cpu().numpy()
         valids_np = valids.long().detach().cpu().numpy()

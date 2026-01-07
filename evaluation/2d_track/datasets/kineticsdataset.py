@@ -48,15 +48,15 @@ class KineticsDataset(PointDataset):
         if isinstance(rgbs[0], bytes):  # decode if needed
             rgbs = [decode(frame) for frame in rgbs]
         trajs = dat['points'] # N,S,2 array
-        visibs = 1-dat['occluded'] # N,S array
+        _visibs = 1-dat['occluded'] # N,S array
         # note the annotations are only valid when visib
         
         trajs = trajs.transpose(1,0,2) # S,N,2
-        visibs = visibs.transpose(1,0) # S,N
-        valids = visibs.copy()
+        _visibs = _visibs.transpose(1,0) # S,N
+        valids = _visibs.copy()
 
-        rgbs, trajs, visibs, valids = holi4d.utils.data.standardize_test_data(
-            rgbs, trajs, visibs, valids, only_first=self.only_first, seq_len=self.seq_len)
+        rgbs, trajs, _visibs, valids = holi4d.utils.data.standardize_test_data(
+            rgbs, trajs, _visibs, valids, only_first=self.only_first, seq_len=self.seq_len)
 
         rgbs = [cv2.resize(rgb, (self.crop_size[1], self.crop_size[0]), interpolation=cv2.INTER_LINEAR) for rgb in rgbs]
         H, W = rgbs[0].shape[:2]
@@ -65,13 +65,13 @@ class KineticsDataset(PointDataset):
 
         rgbs = torch.from_numpy(np.stack(rgbs,0)).permute(0,3,1,2).contiguous().float() # S,C,H,W
         trajs = torch.from_numpy(trajs).float() # S,N,2
-        visibs = torch.from_numpy(visibs).float() # S,N
+        _visibs = torch.from_numpy(_visibs).float() # S,N
         valids = torch.from_numpy(valids).float() # S,N
 
         sample = holi4d.utils.data.VideoData(
             video=rgbs,
             trajs=trajs,
-            visibs=visibs,
+            visibs=_visibs,
             valids=valids, 
             dname=self.dname,
         )

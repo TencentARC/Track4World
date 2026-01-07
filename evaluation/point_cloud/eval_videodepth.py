@@ -29,6 +29,8 @@ import utils3d
 from holi4d.nets.model import Holi4D
 from holi4d.utils.geometry_torch import mask_aware_nearest_resize
 from holi4d.utils.alignment import align_depth_affine
+from utils import *
+from demo import load_model
 
 # ==============================================================================
 # Configuration & Logging
@@ -41,131 +43,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==============================================================================
-# Helper Functions: Image & Video I/O
-# ==============================================================================
-
-def decode_jpeg_bytes(images_jpeg_bytes: List[bytes]) -> np.ndarray:
-    """Decodes a list of JPEG bytes into a numpy array of images."""
-    images = []
-    for jpeg_bytes in images_jpeg_bytes:
-        img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
-        images.append(np.array(img))
-    return np.stack(images, axis=0)
-
-def read_images_or_video(
-    input_path: Union[str, Path], 
-    resize_to: Optional[int], 
-    device: torch.device, 
-    gt_dataset_type: str = 'Sintel'
-) -> Tuple[List[np.ndarray], List[torch.Tensor], np.ndarray]:
-    """
-    Reads frames from a directory of images or a video file.
-
-    Args:
-        input_path: Path to image directory or video file.
-        resize_to: Short edge size to resize to (maintains aspect ratio).
-        device: Torch device.
-        selected_views: Indices of frames to load.
-        gt_dataset_type: Dataset type (affects sorting logic).
-
-    Returns:
-        video: List of numpy images (H, W, 3).
-        video_list: List of torch tensors (3, H, W).
-        selected_views: Array of loaded frame indices.
-    """
-    input_path = Path(input_path)
-    video = []
-    video_list = []
-
-    # --- Case 1: Input is a Directory of Images ---
-    if input_path.is_dir():
-        include_suffices = ['jpg', 'png', 'jpeg', 'JPG', 'PNG', 'JPEG']
-        
-        # Sorting logic depends on dataset naming convention
-        if gt_dataset_type == 'Kubric-3D':
-            # Sort by number in filename
-            image_paths = sorted(
-                itertools.chain(*(input_path.glob(f'*.{suffix}') for suffix in include_suffices)),
-                key=lambda p: int(re.findall(r'\d+', p.stem)[-1]) if re.findall(r'\d+', p.stem) else -1
-            )
-        else:
-            # Sort alphabetically
-            image_paths = sorted(
-                itertools.chain(*(input_path.glob(f'*.{suffix}') for suffix in include_suffices)),
-                key=lambda p: p.name
-            )
-
-        if not image_paths:
-            raise FileNotFoundError(f'No image files found in {input_path}')
-        
-        for i in tqdm(np.arange(len(image_paths)), desc=f'Loading images from {input_path.name}', leave=False):
-            if i < 0 or i >= len(image_paths):
-                continue
-
-            image = cv2.cvtColor(cv2.imread(str(image_paths[i])), cv2.COLOR_BGR2RGB)
-            h, w = image.shape[:2]
-            
-            # Resize logic
-            if resize_to is not None:
-                scale = resize_to / min(h, w)
-                w_new, h_new = int(w * scale), int(h * scale)
-                image = cv2.resize(image, (w_new, h_new), cv2.INTER_AREA)
-
-            video.append(image)
-            image_tensor = torch.tensor(image / 255.0, dtype=torch.float32, device=device).permute(2, 0, 1)
-            video_list.append(image_tensor)
-
-    # --- Case 2: Input is a Video File ---
-    elif input_path.is_file() and input_path.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']:
-        cap = cv2.VideoCapture(str(input_path))
-        if not cap.isOpened():
-            raise IOError(f"Cannot open video file {input_path}")
-        
-        num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_indices_to_read = np.arange(num_frames) 
-
-        for frame_idx in tqdm(frame_indices_to_read, desc=f'Loading video {input_path.name}', leave=False):
-            if frame_idx >= num_frames: break
-            
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if not ret: continue
-            
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w = frame.shape[:2]
-            
-            if resize_to is not None:
-                scale = resize_to / min(h, w)
-                w_new, h_new = int(w * scale), int(h * scale)
-                frame = cv2.resize(frame, (w_new, h_new), cv2.INTER_AREA)
-
-            video.append(frame)
-            image_tensor = torch.tensor(frame / 255.0, dtype=torch.float32, device=device).permute(2, 0, 1)
-            video_list.append(image_tensor)
-
-        cap.release()
-
-    else:
-        raise ValueError(f"Unsupported input: {input_path}")
-
-    return video, video_list
-
-def load_depth_kubric(path: str, depth_range: Tuple[float, float]) -> Tuple[np.ndarray, None]:
-    """Loads 16-bit PNG depth from Kubric dataset and converts to meters."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Depth PNG not found: {path}")
-    
-    depth_uint16 = imageio.imread(path).astype(np.uint16)
-    mask_nan, mask_inf = depth_uint16 == 0, depth_uint16 == 65535
-    
-    depth_min, depth_max = map(float, depth_range)
-    # Normalize to [0, 1] then scale to [min, max]
-    depth_float = depth_min + depth_uint16.astype(np.float32) * (depth_max - depth_min) / np.iinfo(np.uint16).max
-    
-    depth_float[mask_nan] = np.nan
-    depth_float[mask_inf] = np.inf
-    return depth_float, None
 
 # ==============================================================================
 # Helper Functions: Evaluation
@@ -254,253 +131,85 @@ def depth_evaluation(
 
     return results, error_map_full.cpu().numpy()
 
-
-def summarize_evaluation_results(root_dir: str):
-    """
-    Walks through the output directory, parses evaluation_results.txt,
-    and calculates weighted averages for the metrics.
-    """
-    logger.info(f"Summarizing results from: {root_dir}")
-    
-    # Regex patterns to extract metrics
-    pattern_absrel = re.compile(r"Abs_Rel\s+([\d.]+)")
-    pattern_d1 = re.compile(r"d1 < 1.25\s+([\d.]+)")
-    pattern_valid = re.compile(r"Valid Pixels\s+(\d+)")
-
-    records = []
-
-    if not os.path.exists(root_dir):
-        logger.error(f"Output directory {root_dir} does not exist.")
-        return
-
-    # Iterate through all scene subdirectories
-    for scene in sorted(os.listdir(root_dir)):
-        scene_path = os.path.join(root_dir, scene)
-        if not os.path.isdir(scene_path):
-            continue
-            
-        eval_file = os.path.join(scene_path, "evaluation_results.txt")
-        if not os.path.isfile(eval_file):
-            continue
-        
-        try:
-            with open(eval_file, "r") as f:
-                content = f.read()
-            
-            abs_rel_match = pattern_absrel.search(content)
-            d1_match = pattern_d1.search(content)
-            valid_match = pattern_valid.search(content)
-            
-            if abs_rel_match and d1_match and valid_match:
-                abs_rel = float(abs_rel_match.group(1))
-                d1 = float(d1_match.group(1))
-                valid_pixels = int(valid_match.group(1))
-                
-                records.append({
-                    "scene": scene,
-                    "Abs_Rel": abs_rel,
-                    "d1": d1,
-                    "Valid_Pixels": valid_pixels
-                })
-        except Exception as e:
-            logger.warning(f"Error reading {eval_file}: {e}")
-
-    # Calculate and print statistics
-    df = pd.DataFrame(records)
-    if df.empty:
-        logger.warning(f"No valid evaluation files found in {root_dir}")
-    else:
-        # Calculate weighted averages based on valid pixels
-        total_pixels = df["Valid_Pixels"].sum()
-        weighted_abs_rel = (df["Abs_Rel"] * df["Valid_Pixels"]).sum() / total_pixels
-        weighted_d1 = (df["d1"] * df["Valid_Pixels"]).sum() / total_pixels
-
-        print("\n" + "="*50)
-        print("FINAL EVALUATION SUMMARY")
-        print("="*50)
-        print(df.to_string(index=False))
-        print("-" * 50)
-        print(f"📊 Weighted Averages (over {len(df)} scenes):")
-        print(f"  Abs_Rel     = {weighted_abs_rel:.4f}")
-        print(f"  d1 < 1.25   = {weighted_d1:.4f}")
-        print("="*50 + "\n")
-        
-        # Optionally save the summary to a file
-        summary_path = os.path.join(root_dir, "final_summary.txt")
-        with open(summary_path, "w") as f:
-            f.write(df.to_string(index=False))
-            f.write(f"\n\nWeighted Abs_Rel: {weighted_abs_rel:.4f}\n")
-            f.write(f"Weighted d1 < 1.25: {weighted_d1:.4f}\n")
-        logger.info(f"Summary saved to {summary_path}")
-
-# ==============================================================================
-# Helper Functions: Model & Data Loading Logic
-# ==============================================================================
-
-def load_model(args: argparse.Namespace, config: Dict) -> torch.nn.Module:
-    """Initializes the Holi4D model and loads pretrained weights."""
-    logger.info("Initializing Holi4D Model...")
-
-    model = Holi4D(
-        **config['model'],
-        seqlen=16,
-        use_3d=True,
-    )
-
-    if args.ckpt_init and os.path.exists(args.ckpt_init):
-        logger.info(f'Loading weights from local file: {args.ckpt_init}...')
-        state_dict = torch.load(args.ckpt_init, map_location='cpu')
-        model.load_state_dict(state_dict, strict=False)
-    else:
-        url = "https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth"
-        logger.info(f'Local checkpoint not found. Downloading from {url}...')
-        state_dict = torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
-        model.load_state_dict(state_dict, strict=False)
-    
-    device = torch.device(args.device_name)
-    model.to(device)
-    model.eval()
-    
-    # Freeze parameters
-    for p in model.parameters():
-        p.requires_grad = False
-    
-    return model
-
-def get_scene_paths(dataset_type: str) -> List[Path]:
-    """Returns a list of scene paths based on the dataset type."""
-    # NOTE: These paths are hardcoded based on the environment. 
-    root_path = Path(f'evaluation/point_cloud/{dataset_type}')
-    
-    if not root_path.exists():
-        logger.warning(f"Dataset root path does not exist: {root_path}")
-        return []
-
-    return sorted([p for p in root_path.iterdir() if p.is_dir() or p.suffix == '.npz'])
-
-def load_scene_input(
-    input_path: Path, 
+def load_scene_ground_truth(
+    data_dir: Path, 
     args: argparse.Namespace, 
-    device: torch.device, 
-    start_frame: int, 
-    end_frame: int
-) -> Tuple[torch.Tensor, Optional[np.ndarray]]:
-    """
-    Loads the RGB input for a specific scene.
-    Returns:
-        video_tensor: (B, C, H, W) normalized tensor.
-        selected_views: Indices of loaded frames.
-    """
-    if args.gt_dataset_type == 'Kubric-3D':
-        rgb_path = input_path / 'video_frames'
-        _, video_list = read_images_or_video(
-            rgb_path, args.resize_to, device, gt_dataset_type=args.gt_dataset_type
-        )
-        video_tensor = torch.stack(video_list, dim=0)[start_frame:end_frame]
-        selected_views = np.arange(start_frame, min(end_frame, len(video_list)))
-
-    elif args.gt_dataset_type == 'Bonn':
-        rgb_path = input_path / 'rgb_110'
-        _, video_list = read_images_or_video(
-            rgb_path, args.resize_to, device, gt_dataset_type=args.gt_dataset_type
-        )
-        video_tensor = torch.stack(video_list, dim=0)[start_frame:end_frame]
-        selected_views = np.arange(start_frame, min(end_frame, len(video_list)))
-
-    elif args.gt_dataset_type in ['Sintel', 'Scannet', 'Monkaa', 'KITTI', 'GMUKitchens']:
-        # Find the first mp4 file in the directory
-        mp4_files = sorted(input_path.glob("*.mp4"))
-        if not mp4_files:
-            raise FileNotFoundError(f"No .mp4 files found in {input_path}")
-        rgb_path = mp4_files[0]
-        
-        _, video_list = read_images_or_video(
-            rgb_path, args.resize_to, device, gt_dataset_type=args.gt_dataset_type
-        )
-        video_tensor = torch.stack(video_list, dim=0)[start_frame:end_frame]
-        selected_views = np.arange(start_frame, min(end_frame, len(video_list)))
-
-    else:
-        # Fallback for numpy-based datasets (e.g., TUM, PO)
-        input_data = np.load(input_path)
-        video = decode_jpeg_bytes(input_data['images_jpeg_bytes'])
-        h, w = video.shape[1], video.shape[2]
-        
-        video_list = []
-        if args.resize_to is not None:
-            scale = args.resize_to / min(h, w)
-            w_new, h_new = int(w * scale), int(h * scale)
-            for i in range(video.shape[0]):
-                video_list.append(cv2.resize(video[i], (w_new, h_new), cv2.INTER_AREA))
-        else:
-            video_list = [v for v in video]
-            
-        video_np = np.stack(video_list)
-        video_tensor = torch.from_numpy(video_np).to(device)[start_frame:end_frame]
-        video_tensor = video_tensor.permute(0, -1, 1, 2) / 255.0
-        selected_views = np.arange(start_frame, min(end_frame, len(video_list)))
-
-    return video_tensor, selected_views
-
-def load_scene_gt(
-    input_path: Path, 
-    args: argparse.Namespace, 
-    selected_views: np.ndarray, 
+    view_indices: np.ndarray, 
     start_frame: int, 
     end_frame: int
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
-    Loads Ground Truth Point Cloud/Depth and Mask.
+    Loads Ground Truth (GT) Depth maps and Validity Masks from various dataset formats.
+    
+    Args:
+        data_dir: Path to the sequence directory.
+        args: Namespace containing 'gt_dataset_type'.
+        view_indices: Array of indices specifying which frames to load.
+        
     Returns:
-        gt_points: (N, H, W, 3)
-        gt_mask: (N, H, W) or None
+        gt_depths: (N, H, W) depth values in metric units.
+        gt_masks: (N, H, W) binary validity masks.
     """
-    input_name = input_path.stem
-    gt_points = None
-    gt_mask = None
+    sequence_name = data_dir.stem
+    gt_depths = None
+    gt_masks = None
 
+    # --- Case 1: Kubric-3D Dataset ---
     if args.gt_dataset_type == 'Kubric-3D':
-        depth_path = input_path / 'depths'
-        if depth_path.exists():
-            depth_files = sorted([
-                os.path.join(depth_path, f) for f in os.listdir(depth_path) 
+        depth_folder = data_dir / 'depths'
+        if depth_folder.exists():
+            # Gather all depth image files
+            all_depth_files = sorted([
+                os.path.join(depth_folder, f) for f in os.listdir(depth_folder) 
                 if f.endswith(('.png', '.jpg'))
             ])
-            # Load depth range metadata
-            meta_path = input_path / f"{input_name}_sparse_tracking.npy"
-            depth_range = np.load(meta_path, allow_pickle=True).item()["depth_range"]
+            # Metadata contains the normalization range for 16-bit depth
+            metadata_file = data_dir / f"{sequence_name}_sparse_tracking.npy"
+            depth_metadata = np.load(metadata_file, allow_pickle=True).item()
+            range_val = depth_metadata["depth_range"]
             
-            # Load depths corresponding to selected views
+            # Load and un-normalize depth for the specific views
             gt_depths = np.stack([
-                load_depth_kubric(depth_files[i], depth_range)[0] for i in selected_views
+                load_depth_kubric(all_depth_files[i], range_val)[0] 
+                for i in view_indices
             ], axis=0)
 
+    # --- Case 2: HDF5 Standardized Datasets (Sintel, Scannet, etc.) ---
     elif args.gt_dataset_type in ['Sintel', 'Scannet', 'Monkaa', 'KITTI', 'GMUKitchens']:
-        # Load from HDF5
-        hdf5_files = sorted(input_path.glob("*.hdf5"))
+        hdf5_files = sorted(data_dir.glob("*.hdf5"))
         if hdf5_files:
-            with h5py.File(hdf5_files[0], "r") as f:
-                gt_points = np.array(f['point_map'], dtype=np.float32)
-                gt_mask = np.array(f['valid_mask'], dtype=np.float32)
-            gt_depths = gt_points[..., -1][selected_views]
+            with h5py.File(hdf5_files[0], "r") as h5_file:
+                # 'point_map' is (T, H, W, 3); we extract the Z-channel for depth
+                point_map = np.array(h5_file['point_map'], dtype=np.float32)
+                gt_masks = np.array(h5_file['valid_mask'], dtype=np.float32)
+                
+                # Filter by selected views and take the Z component
+                gt_depths = point_map[view_indices, ..., -1]
+                if gt_masks is not None:
+                    gt_masks = gt_masks[view_indices]
 
-    elif args.gt_dataset_type =='Bonn':
-        depth_path = input_path / 'depth_110'
-        if depth_path.exists():
-            depth_files = sorted([
-                os.path.join(depth_path, f) for f in os.listdir(depth_path) 
+    # --- Case 3: Bonn RGB-D Dataset ---
+    elif args.gt_dataset_type == 'Bonn':
+        depth_folder = data_dir / 'depth_110'
+        if depth_folder.exists():
+            all_depth_files = sorted([
+                os.path.join(depth_folder, f) for f in os.listdir(depth_folder) 
                 if f.endswith(('.png', '.jpg'))
             ])
+            # Bonn depth is stored in mm; divide by 5000 to get meters (standard)
             gt_depths = np.stack([
-                np.asarray(Image.open(depth_files[i])).astype(np.float64) / 5000.0 for i in selected_views
+                np.asarray(Image.open(all_depth_files[i])).astype(np.float64) / 5000.0 
+                for i in view_indices
             ], axis=0)
-    else:
-        # Fallback for numpy-based datasets (e.g., TUM, PO)
-        input_data = np.load(input_path)
-        if 'depth_map' in input_data:
-            gt_depths = input_data['depth_map'][selected_views]
 
-    return gt_depths, gt_mask
+    # --- Case 4: Default Numpy Archive Loader (TUM/PO) ---
+    else:
+        # Assumes data is packed in a single .npz or .npy file
+        archive_data = np.load(data_dir)
+        if 'depth_map' in archive_data:
+            gt_depths = archive_data['depth_map'][view_indices]
+
+    return gt_depths, gt_masks
 
 # ==============================================================================
 # Main Execution
@@ -566,6 +275,11 @@ def main():
     parser.add_argument(
         "--chunk_size", type=int, default=130, 
         help="Temporal window size for processing long videos to prevent Out-Of-Memory (OOM) errors"
+    )
+    parser.add_argument(
+        "--coordinate", type=str, default='camera_base', 
+        choices=['camera_base', 'world_pi3', 'world_depthanythingv3'],
+        help="'camera': camera centric, 'world': world centric"
     )
     
     args = parser.parse_args()
@@ -647,7 +361,7 @@ def main():
         # --- Evaluation ---
         logger.info("Loading ground truth for evaluation...")
         try:
-            gt_depths, gt_mask = load_scene_gt(input_path, args, selected_views, start_frame, end_frame)
+            gt_depths, gt_mask = load_scene_ground_truth(input_path, args, selected_views, start_frame, end_frame)
         except Exception as e:
             logger.warning(f"Failed to load GT for {input_name}: {e}. Skipping evaluation.")
             gt_depths = None

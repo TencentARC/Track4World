@@ -796,8 +796,21 @@ def refine_depth_with_normal(
     K_inv = torch.inverse(intrinsics)
 
     # Calculate gradient from normals
-    grad = -(normal[..., None, :2] @ K_inv[..., None, None, :2, :2]).squeeze(-2) \
-            / (normal[..., None, 2:] + normal[..., None, :2] @ (K_inv[..., None, None, :2, :2] @ uv[..., :, None] + K_inv[..., None, None, :2, 2:])).squeeze(-2)
+    # --- 1. Compute the Numerator ---
+    # Project the first two components of the normal through the camera intrinsics
+    norm_proj_xy = normal[..., None, :2] @ K_inv[..., None, None, :2, :2]
+    num = -norm_proj_xy.squeeze(-2)
+
+    # --- 2. Compute the Denominator ---
+    # This term accounts for the plane's depth and perspective distortion
+    K_inv_part = K_inv[..., None, None, :2, :2] @ uv[..., :, None]
+    K_inv_full = K_inv_part + K_inv[..., None, None, :2, 2:]
+    denom_offset = normal[..., None, :2] @ K_inv_full
+    den = (normal[..., None, 2:] + denom_offset).squeeze(-2)
+
+    # --- 3. Final Gradient Calculation ---
+    # Resulting grad represents (dz/du, dz/dv)
+    grad = num / den
     
     # Compute Laplacian
     laplacian = (
