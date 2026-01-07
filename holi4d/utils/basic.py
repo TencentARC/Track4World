@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from typing import Optional, Tuple, Union
 
+# Small constant to avoid numerical instability (e.g., division by zero)
 EPS = 1e-6
 
 def sub2ind(height: int, width: int, y: int, x: int) -> int:
@@ -39,7 +40,10 @@ def mkdir(path: str):
     os.makedirs(path, exist_ok=True)
         
 def print_stats(name: str, tensor: torch.Tensor):
-    """Prints basic statistics of a tensor."""
+    """
+    Prints basic statistics (min/mean/max/shape) of a tensor.
+    Helpful for debugging and sanity checks.
+    """
     if isinstance(tensor, torch.Tensor):
         tensor_np = tensor.detach().cpu().numpy()
     else:
@@ -59,8 +63,13 @@ def normalize_single(d: torch.Tensor) -> torch.Tensor:
 
 def normalize(d: torch.Tensor) -> torch.Tensor:
     """
-    Normalizes a batch of tensors to [0, 1] independently per batch item.
-    Input: (B, ...)
+    Normalizes a batch of tensors to [0, 1] independently per batch element.
+
+    Args:
+        d: Tensor of shape (B, ...)
+
+    Returns:
+        Normalized tensor with the same shape as d.
     """
     # Vectorized implementation (much faster than looping)
     B = d.shape[0]
@@ -79,7 +88,10 @@ def normalize(d: torch.Tensor) -> torch.Tensor:
     return (d - dmin) / (dmax - dmin + EPS)
 
 def normalize_grid2d(grid_y: torch.Tensor, grid_x: torch.Tensor, Y: int, X: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Normalizes grid coordinates to [-1, 1] range."""
+    """
+    Normalizes 2D grid coordinates to the range [-1, 1],
+    which is required by torch.nn.functional.grid_sample.
+    """
     # Maps [0, Y-1] -> [-1, 1]
     grid_y = 2.0 * (grid_y / (Y - 1 + EPS)) - 1.0
     grid_x = 2.0 * (grid_x / (X - 1 + EPS)) - 1.0
@@ -88,7 +100,11 @@ def normalize_grid2d(grid_y: torch.Tensor, grid_x: torch.Tensor, Y: int, X: int)
 def meshgrid2d(B: int, Y: int, X: int, stack: bool = False, norm: bool = False, 
                device: Union[str, torch.device] = 'cuda', on_chans: bool = False):
     """
-    Returns a meshgrid sized B x Y x X.
+    Creates a 2D meshgrid and optionally expands it to a batch.
+
+    Returns:
+        grid_y, grid_x with shape (B, Y, X), or
+        a stacked grid suitable for grid_sample.
     """
     # Use torch.meshgrid with indexing='ij' to match original logic (Y varies along dim 0, X along dim 1)
     # grid_y: (Y, X), grid_x: (Y, X)
@@ -117,8 +133,10 @@ def meshgrid2d(B: int, Y: int, X: int, stack: bool = False, norm: bool = False,
 
 def gridcloud2d(B: int, Y: int, X: int, norm: bool = False, device: Union[str, torch.device] = 'cuda') -> torch.Tensor:
     """
-    Returns a point cloud of grid coordinates.
-    Output: (B, N, 2) where N = Y*X
+    Converts a 2D grid into a point cloud representation.
+
+    Returns:
+        Tensor of shape (B, Y*X, 2), storing (x, y) coordinates.
     """
     grid_y, grid_x = meshgrid2d(B, Y, X, norm=norm, device=device)
     x = torch.reshape(grid_x, [B, -1])
@@ -146,8 +164,11 @@ def reduce_masked_mean(x: torch.Tensor, mask: torch.Tensor, dim: Optional[int] =
         
 def reduce_masked_median(x: torch.Tensor, mask: torch.Tensor, keep_batch: bool = False) -> torch.Tensor:
     """
-    Computes median of x where mask is true.
-    Note: Moves data to CPU to use numpy.median, as PyTorch masked median is non-trivial.
+    Computes the median of x over masked elements.
+
+    Note:
+        The computation is done on CPU using NumPy, since
+        PyTorch does not natively support masked median.
     """
     assert_same_shape(x, mask)
     device = x.device
