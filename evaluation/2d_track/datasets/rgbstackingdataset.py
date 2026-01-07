@@ -49,7 +49,7 @@ class RGBStackingDataset(PointDataset):
         rgbs = dat_['video']
 
         # Point trajectories with shape (N, S, 2)
-        trajs = dat_['points']
+        trajs_rgb = dat_['points']
 
         # Visibility mask: 1 means visible, 0 means occluded
         visibs_ = 1 - dat_['occluded']
@@ -58,15 +58,15 @@ class RGBStackingDataset(PointDataset):
         valids = visibs_.copy()
         
         # Transpose trajectories to shape (S, N, 2)
-        trajs = trajs.transpose(1, 0, 2)
+        trajs_rgb = trajs_rgb.transpose(1, 0, 2)
 
         # Transpose visibility and validity masks to shape (S, N)
         visibs_ = visibs_.transpose(1, 0)
         valids = valids.transpose(1, 0)
 
         # Standardize data format (temporal trimming, first-frame selection, etc.)
-        rgbs, trajs, visibs_, valids = holi4d.utils.data.standardize_test_data(
-            rgbs, trajs, visibs_, 
+        rgbs, trajs_rgb, visibs_, valids = holi4d.utils.data.standardize_test_data(
+            rgbs, trajs_rgb, visibs_, 
             valids, only_first=self.only_first,
             seq_len=self.seq_len
         )
@@ -83,8 +83,8 @@ class RGBStackingDataset(PointDataset):
         # Scale normalized trajectory coordinates to pixel coordinates
         # (1.0, 1.0) corresponds to the bottom-right pixel
         H, W = rgbs[0].shape[:2]
-        trajs[:, :, 0] *= W - 1
-        trajs[:, :, 1] *= H - 1
+        trajs_rgb[:, :, 0] *= W - 1
+        trajs_rgb[:, :, 1] *= H - 1
         
         # Convert RGB frames to a PyTorch tensor with shape (S, C, H, W)
         rgbs = (
@@ -95,14 +95,14 @@ class RGBStackingDataset(PointDataset):
         )
 
         # Convert trajectories and masks to PyTorch tensors
-        trajs = torch.from_numpy(trajs).float()    # (S, N, 2)
+        trajs_rgb = torch.from_numpy(trajs_rgb).float()    # (S, N, 2)
         visibs_ = torch.from_numpy(visibs_).float()  # (S, N)
         valids = torch.from_numpy(valids).float()  # (S, N)
 
         # Package everything into a VideoData object
         sample = holi4d.utils.data.VideoData(
             video=rgbs,
-            trajs=trajs,
+            trajs=trajs_rgb,
             visibs=visibs_,
             valids=valids, 
             dname=self.dname,

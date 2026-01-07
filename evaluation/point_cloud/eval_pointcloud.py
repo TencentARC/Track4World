@@ -266,23 +266,24 @@ def main():
         help="Maximum depth threshold (meters) for evaluation metrics"
     )
     parser.add_argument(
-        "--chunk_size", type=int, default=130, 
-        help="Temporal chunk size for processing long videos to manage VRAM"
-    )
-    parser.add_argument(
         "--coordinate", type=str, default='camera_base', 
         choices=['camera_base', 'world_pi3', 'world_depthanythingv3'],
         help="'camera': camera centric, 'world': world centric"
     )
+    parser.add_argument(
+        "--chunk_size", type=int, default=130, 
+        help="Temporal chunk size for processing long videos to manage VRAM"
+    )
+
 
     args = parser.parse_args()
 
     # 1. Setup
     torch.set_grad_enabled(False)
+
     if not os.path.exists(args.config_path):
         logger.error(f"Config file not found: {args.config_path}")
         sys.exit(1)
-        
     with open(args.config_path, "r") as f:
         config = json.load(f)
 
@@ -293,14 +294,12 @@ def main():
     # 3. Prepare Data Paths
     logger.info(f"Output will be saved to: {args.output_path}")
     input_paths = get_scene_paths(args.gt_dataset_type)
-    
     if not input_paths:
         logger.error("No scenes found. Exiting.")
         sys.exit(1)
 
     # 4. Process Scenes
     for input_path in tqdm(input_paths, desc="Processing scenes"):
-        torch.cuda.empty_cache()
         input_name = input_path.stem
         
         # Create unique output directory

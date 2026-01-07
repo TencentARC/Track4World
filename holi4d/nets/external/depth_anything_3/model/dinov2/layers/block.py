@@ -1,43 +1,35 @@
+# flake8: noqa: F821
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
-# This source code is licensed under the Apache License, Version 2.0
-# found in the LICENSE file in the root directory of this source tree.
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
 
 # References:
 #   https://github.com/facebookresearch/dino/blob/master/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/layers/patch_embed.py
 
 import logging
-import os
-from typing import Callable, List, Any, Tuple, Dict
-import warnings
-
+from typing import Callable, Optional
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 
-from ..dinov2.layers.drop_path import DropPath
-from ..dinov2.layers.layer_scale import LayerScale
-from ..dinov2.layers.mlp import Mlp
-from ..dinov2.layers.block import *
 from .attention import Attention
-# Flag indicating whether xFormers (memory-efficient attention) is available
-XFORMERS_AVAILABLE = False
+from .drop_path import DropPath
+from .layer_scale import LayerScale
+from .mlp import Mlp
+
+logger = logging.getLogger("dinov2")
+XFORMERS_AVAILABLE = True
 
 
 class Block(nn.Module):
-    """
-    Standard Transformer block consisting of:
-        - LayerNorm + Multi-Head Self-Attention
-        - LayerNorm + Feed-Forward Network (MLP)
-        - Optional LayerScale and Stochastic Depth (DropPath)
-    """
-
     def __init__(
         self,
         dim: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
-        qkv_bias: bool = True,
+        qkv_bias: bool = False,
         proj_bias: bool = True,
         ffn_bias: bool = True,
         drop: float = 0.0,
@@ -49,15 +41,12 @@ class Block(nn.Module):
         attn_class: Callable[..., nn.Module] = Attention,
         ffn_layer: Callable[..., nn.Module] = Mlp,
         qk_norm: bool = False,
-        fused_attn: bool = True,  # whether to use scaled_dot_product_attention
-        rope=None,                # rotary positional embedding (optional)
+        rope=None,
+        ln_eps: float = 1e-6,
     ) -> None:
         super().__init__()
-
-        # Pre-norm before attention
-        self.norm1 = norm_layer(dim)
-
-        # Multi-head self-attention module
+        # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
+        self.norm1 = norm_layer(dim, eps=ln_eps)
         self.attn = attn_class(
             dim,
             num_heads=num_heads,
@@ -66,18 +55,12 @@ class Block(nn.Module):
             attn_drop=attn_drop,
             proj_drop=drop,
             qk_norm=qk_norm,
-            fused_attn=fused_attn,
             rope=rope,
         )
-
-        # LayerScale and stochastic depth for attention branch
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        # Pre-norm before FFN
-        self.norm2 = norm_layer(dim)
-
-        # Feed-forward network
+        self.norm2 = norm_layer(dim, eps=ln_eps)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = ffn_layer(
             in_features=dim,
@@ -86,26 +69,14 @@ class Block(nn.Module):
             drop=drop,
             bias=ffn_bias,
         )
-
-        # LayerScale and stochastic depth for FFN branch
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        # Drop-path ratio used for sample-wise stochastic depth
         self.sample_drop_ratio = drop_path
 
-    def forward(self, x: Tensor, pos=None) -> Tensor:
-        """
-        Args:
-            x: Input tensor of shape (B, N, C)
-            pos: Optional positional encoding (e.g., RoPE)
-
-        Returns:
-            Output tensor with the same shape as x
-        """
-
-        def attn_residual_func(x: Tensor, pos=None) -> Tensor:
-            return self.ls1(self.attn(self.norm1(x), pos=pos))
+    def forward(self, x: Tensor, pos=None, attn_mask=None) -> Tensor:
+        def attn_residual_func(x: Tensor, pos=None, attn_mask=None) -> Tensor:
+            return self.ls1(self.attn(self.norm1(x), pos=pos, attn_mask=attn_mask))
 
         def ffn_residual_func(x: Tensor) -> Tensor:
             return self.ls2(self.mlp(self.norm2(x)))
@@ -114,9 +85,9 @@ class Block(nn.Module):
             # the overhead is compensated only for a drop path rate larger than 0.1
             x = drop_add_residual_stochastic_depth(
                 x,
-                pos=pos,
                 residual_func=attn_residual_func,
                 sample_drop_ratio=self.sample_drop_ratio,
+                pos=pos,
             )
             x = drop_add_residual_stochastic_depth(
                 x,
@@ -124,10 +95,10 @@ class Block(nn.Module):
                 sample_drop_ratio=self.sample_drop_ratio,
             )
         elif self.training and self.sample_drop_ratio > 0.0:
-            x = x + self.drop_path1(attn_residual_func(x, pos=pos))
+            x = x + self.drop_path1(attn_residual_func(x, pos=pos, attn_mask=attn_mask))
             x = x + self.drop_path1(ffn_residual_func(x))  # FIXME: drop_path2
         else:
-            x = x + attn_residual_func(x, pos=pos)
+            x = x + attn_residual_func(x, pos=pos, attn_mask=attn_mask)
             x = x + ffn_residual_func(x)
         return x
 
@@ -136,15 +107,8 @@ def drop_add_residual_stochastic_depth(
     x: Tensor,
     residual_func: Callable[[Tensor], Tensor],
     sample_drop_ratio: float = 0.0,
-    pos=None,
+    pos: Optional[Tensor] = None,
 ) -> Tensor:
-    """
-    Applies stochastic depth by computing residuals only on a subset
-    of batch samples and scaling them accordingly.
-
-    This reduces computation while preserving expectation.
-    """
-
     # 1) extract subset using permutation
     b, n, d = x.shape
     sample_subset_size = max(int(b * (1 - sample_drop_ratio)), 1)
@@ -165,5 +129,15 @@ def drop_add_residual_stochastic_depth(
     residual_scale_factor = b / sample_subset_size
 
     # 3) add the residual
-    x_plus_residual = torch.index_add(x_flat, 0, brange, residual.to(dtype=x.dtype), alpha=residual_scale_factor)
+    x_plus_residual = torch.index_add(
+        x_flat, 0, brange, residual.to(dtype=x.dtype), alpha=residual_scale_factor
+    )
     return x_plus_residual.view_as(x)
+
+
+def get_branges_scales(x, sample_drop_ratio=0.0):
+    b, n, d = x.shape
+    sample_subset_size = max(int(b * (1 - sample_drop_ratio)), 1)
+    brange = (torch.randperm(b, device=x.device))[:sample_subset_size]
+    residual_scale_factor = b / sample_subset_size
+    return brange, residual_scale_factor

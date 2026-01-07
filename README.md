@@ -51,6 +51,7 @@ conda activate holi4d
 pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 
+git clone https://github.com/jiah-cloud/utils3d.git 
 git clone --no-checkout https://github.com/yyfz/Pi3.git holi4d/nets/external/pi3_repo
 cd holi4d/nets/external/pi3_repo
 git sparse-checkout init
@@ -69,11 +70,11 @@ find . -maxdepth 1 -type f -exec rm -f {} \;
 mv src/depth_anything_3 ../depth_anything_3
 cd ../../../..
 
+git clone https://github.com/IDEA-Research/Grounded-SAM-2.git submodules
 cd submodules
-git clone https://github.com/IDEA-Research/Grounded-SAM-2.git
 pip install -e .
 pip install --no-build-isolation -e grounding_dino
-cd ../..
+cd ..
 
 mkdir -p checkpoints
 wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -O ./checkpoints/sam2.1_hiera_large.pt

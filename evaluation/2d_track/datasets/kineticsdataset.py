@@ -47,30 +47,30 @@ class KineticsDataset(PointDataset):
         rgbs = dat['video'] # list of H,W,C uint8 images
         if isinstance(rgbs[0], bytes):  # decode if needed
             rgbs = [decode(frame) for frame in rgbs]
-        trajs = dat['points'] # N,S,2 array
+        trajs_kin = dat['points'] # N,S,2 array
         _visibs = 1-dat['occluded'] # N,S array
         # note the annotations are only valid when visib
         
-        trajs = trajs.transpose(1,0,2) # S,N,2
+        trajs_kin = trajs_kin.transpose(1,0,2) # S,N,2
         _visibs = _visibs.transpose(1,0) # S,N
         valids = _visibs.copy()
 
-        rgbs, trajs, _visibs, valids = holi4d.utils.data.standardize_test_data(
-            rgbs, trajs, _visibs, valids, only_first=self.only_first, seq_len=self.seq_len)
+        rgbs, trajs_kin, _visibs, valids = holi4d.utils.data.standardize_test_data(
+            rgbs, trajs_kin, _visibs, valids, only_first=self.only_first, seq_len=self.seq_len)
 
         rgbs = [cv2.resize(rgb, (self.crop_size[1], self.crop_size[0]), interpolation=cv2.INTER_LINEAR) for rgb in rgbs]
         H, W = rgbs[0].shape[:2]
-        trajs[:,:,0] *= W-1
-        trajs[:,:,1] *= H-1
+        trajs_kin[:,:,0] *= W-1
+        trajs_kin[:,:,1] *= H-1
 
         rgbs = torch.from_numpy(np.stack(rgbs,0)).permute(0,3,1,2).contiguous().float() # S,C,H,W
-        trajs = torch.from_numpy(trajs).float() # S,N,2
+        trajs_kin = torch.from_numpy(trajs_kin).float() # S,N,2
         _visibs = torch.from_numpy(_visibs).float() # S,N
         valids = torch.from_numpy(valids).float() # S,N
 
         sample = holi4d.utils.data.VideoData(
             video=rgbs,
-            trajs=trajs,
+            trajs=trajs_kin,
             visibs=_visibs,
             valids=valids, 
             dname=self.dname,
