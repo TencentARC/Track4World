@@ -323,27 +323,40 @@ def get_shared_args():
     parser = argparse.ArgumentParser(description="Holi4D Inference and Evaluation Script")
 
     # --- Model & Environment ---
-    parser.add_argument("--ckpt_init", type=str, default="./checkpoints/holi4d.pth", help="Path to pretrained model checkpoint")
-    parser.add_argument("--config_path", type=str, default="./holi4d/config/eval/v1.json", help="Path to model config JSON")
-    parser.add_argument("--output", "-o", dest="output_path", type=str, default='./output_eval', help="Output directory")
-    parser.add_argument("--device", dest="device_name", type=str, default='cuda', help="Computation device")
-    parser.add_argument("--fp16", action='store_true', help="Enable half-precision (float16)")
+    parser.add_argument("--ckpt_init", type=str, default="./checkpoints/holi4d.pth", 
+                        help="Path to pretrained model checkpoint")
+    parser.add_argument("--config_path", type=str, default="./holi4d/config/eval/v1.json",
+                        help="Path to model config JSON")
+    parser.add_argument("--output", "-o", dest="output_path", type=str, default='./output_eval', 
+                        help="Output directory")
+    parser.add_argument("--device", dest="device_name", type=str, default='cuda', 
+                        help="Computation device")
+    parser.add_argument("--fp16", action='store_true', 
+                        help="Enable half-precision (float16)")
     
     # --- Data & Input ---
-    parser.add_argument("--resize-to", type=int, default=512, help="Resize short edge to this resolution")
-    parser.add_argument("--frames", type=str, default='0-150', help="Frame range 'start-end'")
+    parser.add_argument("--resize-to", type=int, default=512, 
+                        help="Resize short edge to this resolution")
+    parser.add_argument("--frames", type=str, default='0-150', 
+                        help="Frame range 'start-end'")
     # Merged choices from both scripts
     parser.add_argument("--gt-dataset-type", type=str, default='Sintel', 
                         choices=['Tum', 'Bonn', 'Sintel', 'Scannet', 'Monkaa', 'Kubric-3D', 'KITTI', 'GMUKitchens'], 
                         help="Ground truth dataset format")
     
     # --- Inference Parameters ---
-    parser.add_argument("--fov_x", dest="fov_x_", type=float, default=None, help="Horizontal FOV")
-    parser.add_argument("--resolution_level", type=int, default=0, help="Detail level [0-9]")
-    parser.add_argument("--num_tokens", type=int, default=None, help="Explicit token count")
-    parser.add_argument("--max-depth", type=float, default=70.0, help="Max depth threshold for metrics")
-    parser.add_argument("--coordinate", type=str, default='camera_base', choices=['camera_base', 'world_pi3', 'world_depthanythingv3'])
-    parser.add_argument("--chunk_size", type=int, default=130, help="Temporal chunk size")
+    parser.add_argument("--fov_x", dest="fov_x_", type=float, default=None, 
+                        help="Horizontal FOV")
+    parser.add_argument("--resolution_level", type=int, default=0,
+                        help="Detail level [0-9]")
+    parser.add_argument("--num_tokens", type=int, default=None, 
+                        help="Explicit token count")
+    parser.add_argument("--max-depth", type=float, default=70.0, 
+                        help="Max depth threshold for metrics")
+    parser.add_argument("--coordinate", type=str, default='camera_base', 
+                        choices=['camera_base', 'world_pi3', 'world_depthanythingv3'])
+    parser.add_argument("--chunk_size", type=int, default=130,
+                        help="Temporal chunk size")
 
     return parser.parse_args()
 
