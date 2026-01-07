@@ -29,6 +29,7 @@ from holi4d.utils.geometry_torch import mask_aware_nearest_resize
 from holi4d.utils.alignment import align_points_scale_xyz_shift
 from demo import load_model
 from frame_utils import *
+import utils3d
 # ==============================================================================
 # Configuration & Logging
 # ==============================================================================
@@ -373,20 +374,25 @@ class Kubric3DflowDataset(torch.utils.data.Dataset):
         return len(self.data_list)
 
 # ==============================================================================
-# Evaluation Loop
+# Evaluation Loop (Refactored)
 # ==============================================================================
 
 @torch.inference_mode()
-def test_kitti(model: torch.nn.Module, args: argparse.Namespace):
+def _evaluate_model(model, loader, batch_processor_fn, alignment_exp=10, aligned_scene_flow=True):
     """
-    Main evaluation loop for KITTI Scene Flow.
+    Generic evaluation loop shared across datasets.
+    
+    Args:
+        model: The model to evaluate.
+        loader: The dataloader.
+        batch_processor_fn: A function that takes (batch, model) and returns:
+            - rgb_images: Input tensor for the model.
+            - gt_data: Dict containing 'points', 'flow3d', 'flow2d', 'valid'.
+            - meta: Dict containing 'H', 'W'.
+        alignment_exp: Exponent used for alignment scaling (default 10, BlinkVision uses 20).
+        aligned_scene_flow: Whether to align.
     """
-    # 1. Setup DataLoader
-    loader_args = {'batch_size': 1, 'shuffle': False, 'num_workers': 4, 'drop_last': False}
-    test_dataset = KITTIDataset(root='evaluation/flow/kitti')
-    test_loader = DataLoader(test_dataset, **loader_args)
-
-    # 2. Initialize Metrics
+    # 1. Initialize Metrics
     count_all = 0
     metrics_all = {
         'EPE3D': 0.0, 'Acc3D_strict': 0.0, 'Acc3D_relax': 0.0, 'Outlier': 0.0, 
@@ -394,58 +400,48 @@ def test_kitti(model: torch.nn.Module, args: argparse.Namespace):
         "abs_rel": 0.0, "threshold_1": 0.0
     }
 
-    logger.info(f"Starting evaluation with {len(test_loader)} batches...")
+    logger.info(f"Starting evaluation with {len(loader)} batches...")
 
-    # 3. Iterate over dataset
-    for i_batch, test_data_blob in enumerate(tqdm(test_loader)):
+    # 2. Iterate over dataset
+    for i_batch, batch_blob in enumerate(tqdm(loader)):
         
-        # Unpack data
-        image1, image2, depth1, depth2, flow_gt, valid, intrinsics, extrinsics, P1, P2 = \
-            [data_item.cuda() for data_item in test_data_blob]
-
-        valid_mask = valid.unsqueeze(-1) > 0.5
+        # --- A. Pre-process Batch (Dataset Specific) ---
+        rgb_images, gt_data, meta = batch_processor_fn(batch_blob)
         
-        # Prepare Ground Truth Flow (Absolute Coordinates)
-        # flow_gt is relative (u_shift, v_shift). We convert it to absolute (u_new, v_new)
-        # because the model output might be in absolute coordinates.
-        H, W = flow_gt.shape[1], flow_gt.shape[2]
-        grid_xy = holi4d.utils.basic.gridcloud2d(1, H, W, norm=False, device='cuda:0').float()
-        grid_xy = grid_xy.reshape(1, H, W, 2) 
-        
-        flow2d_absolute = flow_gt + grid_xy 
-        gt_3dmotion = P2 - P1
-
-        # 4. Model Inference
-        rgb_images = torch.cat([image1, image2], dim=0) # Stack frames
-        
+        # --- B. Model Inference ---
         with torch.autocast(device_type='cuda', dtype=torch.float32):
             output = model.infer_pair(
-                rgb_images[None], 
+                rgb_images, 
                 iters=4, 
                 sw=None, 
                 is_training=False, 
                 tracking3d=True, 
                 force_projection=True, 
-                apply_mask=False
+                apply_mask=False,
+                aligned_scene_flow=aligned_scene_flow
             )
-        
-        # 5. Extract Predictions
+
+        # --- C. Extract Predictions ---
         # 2D Motion (Absolute coordinates)
-        pred_2d_motion = output[1]['flow_2d'][:, 0].permute(0, 2, 3, 1)
+        pred_2d_motion = output[1]['flow_2d'][:, 0].permute(0, 2, 3, 1) # (B, H, W, 2)
         
         # 3D Motion & Points
         pred_points = output[0]['points'][:, 0]
         pred_flow3d = output[1]['flow_3d'][:, 0]
         pred_3dmotion = pred_flow3d - pred_points
 
-        # 6. Alignment (Scale & Shift)
-        # Since monocular depth is scale-ambiguous, we align predictions to GT.
-        # We concatenate points and flow to align them together.
-        gt_concat = torch.cat([P1, P2], dim=0)
-        pred_concat = torch.cat([pred_points, pred_flow3d], dim=0)
-        valid_concat = torch.cat([valid_mask[..., 0], valid_mask[..., 0]], dim=0)
+        # --- D. Alignment (Scale & Shift) ---
+        # Concatenate points and flow for unified alignment
+        # GT Data
+        gt_concat = torch.cat([gt_data['points'], gt_data['flow3d']], dim=0)
+        gt_3dmotion = gt_data['flow3d'] - gt_data['points']
+        valid_mask = gt_data['valid']
+        valid_concat = torch.cat([valid_mask, valid_mask], dim=0)
 
-        # Use a low-resolution mask-aware resize for efficient alignment calculation
+        # Pred Data
+        pred_concat = torch.cat([pred_points, pred_flow3d], dim=0)
+
+        # Low-resolution mask-aware resize for efficient alignment calculation
         _, lr_mask, lr_index = mask_aware_nearest_resize(None, valid_concat, (32, 32), return_index=True)
         
         pred_points_lr = pred_concat[lr_index][lr_mask]
@@ -456,18 +452,18 @@ def test_kitti(model: torch.nn.Module, args: argparse.Namespace):
             pred_points_lr, 
             gt_points_lr, 
             1 / (gt_points_lr.norm(dim=-1) + 1e-6), 
-            exp=10
+            exp=alignment_exp
         )
         
         # Apply alignment
         pred_aligned = pred_concat * scale + shift
-        pred_3dmotion_aligned = pred_3dmotion * scale # Motion only needs scaling
+        pred_3dmotion_aligned = pred_3dmotion * scale
 
-        # 7. Compute Metrics
+        # --- E. Compute Metrics ---
         count_all += valid_mask.sum()
         
-        metrics_sf = compute_scene_flow_metrics(pred_3dmotion_aligned, gt_3dmotion, valid_mask[..., 0])
-        metrics_of = compute_optical_flow_metrics(pred_2d_motion, flow2d_absolute, valid_mask[..., 0])
+        metrics_sf = compute_scene_flow_metrics(pred_3dmotion_aligned, gt_3dmotion, valid_mask)
+        metrics_of = compute_optical_flow_metrics(pred_2d_motion, gt_data['flow2d'], valid_mask)
         metrics_pc = compute_pc_metrics(pred_aligned, gt_concat, valid_concat)
 
         # Accumulate results
@@ -478,7 +474,7 @@ def test_kitti(model: torch.nn.Module, args: argparse.Namespace):
         for key, val in metrics_pc.items():
             metrics_all[key] += 0 if math.isnan(val) else val
 
-    # 8. Print Final Results
+    # 3. Print Final Results
     logger.info("Evaluation Complete. Results:")
     table = PrettyTable(['Metric', 'Value'])
     
@@ -492,14 +488,112 @@ def test_kitti(model: torch.nn.Module, args: argparse.Namespace):
     
     print(table)
 
-@torch.inference_mode()
-def test_kubric(model: torch.nn.Module, args: argparse.Namespace):
-    """
-    Main evaluation loop for Kubric Scene Flow.
-    """
-    # 1. Setup DataLoader
-    loader_args = {'batch_size': 1, 'shuffle': False, 'num_workers': 4, 'drop_last': False}
+
+# ==============================================================================
+# Batch Processors (Dataset Specific Logic)
+# ==============================================================================
+
+def _process_kitti_batch(batch_blob):
+    """Processor for KITTI dataset structure."""
+    image1, image2, depth1, depth2, flow_gt, valid, intrinsics, extrinsics, P1, P2 = \
+        [data_item.cuda() for data_item in batch_blob]
+
+    valid_mask = (valid.unsqueeze(-1) > 0.5)[..., 0] # (B, H, W)
     
+    # Prepare Ground Truth Flow (Absolute Coordinates)
+    H, W = flow_gt.shape[1], flow_gt.shape[2]
+    grid_xy = holi4d.utils.basic.gridcloud2d(1, H, W, norm=False, device='cuda:0').float()
+    grid_xy = grid_xy.reshape(1, H, W, 2) 
+    
+    flow2d_absolute = flow_gt + grid_xy 
+    
+    # Stack frames for inference
+    rgb_images = torch.cat([image1, image2], dim=0) 
+    # (B*2, 3, H, W) or (1, 2, 3, H, W) depending on model input expectation
+    # Note: The original code did `rgb_images[None]` inside infer_pair for KITTI, 
+    # but `rgb_images` passed to infer_pair for Kubric was (B, 2, 3, H, W).
+    # Assuming standard input is (B, 2, 3, H, W).
+    if rgb_images.dim() == 4:
+        rgb_images = rgb_images.unsqueeze(0)
+
+    return rgb_images, {
+        'points': P1,
+        'flow3d': P2, # Used to calculate motion P2-P1
+        'flow2d': flow2d_absolute,
+        'valid': valid_mask
+    }, {'H': H, 'W': W}
+
+
+def _process_kubric_blink_batch(batch_blob, use_ray, check_visibility):
+    """Processor for Kubric and BlinkVision dataset structures."""
+    batch_data = batch_blob[0]
+    
+    rgb_images = batch_data['rgb_images'].float().cuda()        # (B, 2, 3, H, W)
+    depths = batch_data['depths'].float().cuda()                # (B, 2, H, W)
+    forward_depth = batch_data['forward_depth'].float().cuda()  # (B, 2, H, W)
+    forward_2dmotion = batch_data['forward_2dmotion'].float().cuda() # (B, 2, H, W, 2)
+    visibility = batch_data['visibility'].float().cuda()        # (B, 2, H, W)
+    intrinsics = batch_data['intrinsics'].float().cuda()        # (B, 2, 3, 3)
+    flow_valid = batch_data['valid'].cuda()                     # (B, 2, H, W)
+
+    # Prepare masks for the first frame (t=0)
+    flow_valid = flow_valid[:, 0]
+    visibility = visibility[:, 0]
+    
+    if check_visibility:
+        flow_valid = flow_valid & (visibility == 1)
+    
+    H, W = rgb_images.shape[-2], rgb_images.shape[-1]
+
+    # Normalize GT 2D motion to pixel coordinates for unprojection
+    forward_2dmotion[..., 0] /= W
+    forward_2dmotion[..., 1] /= H
+    
+    # Unproject GT flow to 3D
+    gt_3dflow = utils3d.torch.unproject_cv(
+        forward_2dmotion, 
+        forward_depth, 
+        intrinsics=intrinsics[..., None, :, :], 
+        use_ray=use_ray
+    )
+    
+    # Restore 2D motion to pixel units for metric calculation
+    forward_2dmotion[..., 0] *= W
+    forward_2dmotion[..., 1] *= H 
+    gt_flow2d = forward_2dmotion[:, 0]
+    
+    # Get GT 3D points from depth
+    gt_points = utils3d.torch.depth_to_points(depths, intrinsics=intrinsics, use_ray=use_ray)
+
+    return rgb_images, {
+        'points': gt_points[:, 0],
+        'flow3d': gt_3dflow[:, 0],
+        'flow2d': gt_flow2d,
+        'valid': flow_valid
+    }, {'H': H, 'W': W}
+
+
+# ==============================================================================
+# Entry Points
+# ==============================================================================
+
+def test_kitti(model: torch.nn.Module, args: argparse.Namespace):
+    loader_args = {'batch_size': 1, 'shuffle': False, 'num_workers': 4, 'drop_last': False}
+    test_dataset = KITTIDataset(root='evaluation/flow/kitti')
+    test_loader = DataLoader(test_dataset, **loader_args)
+    
+    _evaluate_model(
+        model,
+        test_loader,
+        _process_kitti_batch,
+        alignment_exp=20,
+        aligned_scene_flow=True
+    )
+
+
+def test_kubric(model: torch.nn.Module, args: argparse.Namespace):
+    loader_args = {'batch_size': 1, 'shuffle': False, 'num_workers': 4, 'drop_last': False}
+     
     if args.len_level == 0:
         data_dir = 'evaluation/flow/kubric_short'
     elif args.len_level == 1:
@@ -509,281 +603,31 @@ def test_kubric(model: torch.nn.Module, args: argparse.Namespace):
         
     test_dataset = Kubric3DflowDataset(root=data_dir)
     test_loader = DataLoader(test_dataset, **loader_args)
+    
+    # Kubric: use_ray=True, check_visibility=False (based on original code comments), exp=10
+    processor = lambda b: _process_kubric_blink_batch(b, use_ray=True, check_visibility=False)
+    _evaluate_model(
+        model, 
+        test_loader, 
+        processor, 
+        alignment_exp=20, 
+        aligned_scene_flow=False
+    )
 
-    # 2. Initialize Metrics
-    count_all = 0
-    metrics_all = {
-        'EPE3D': 0.0, 'Acc3D_strict': 0.0, 'Acc3D_relax': 0.0, 'Outlier': 0.0, 
-        "EPE2D": 0.0, "ACC1_2D": 0.0, "ACC3_2D": 0.0, "Outlier_2D": 0.0,
-        "abs_rel": 0.0, "threshold_1": 0.0
-    }
 
-    logger.info(f"Starting evaluation with {len(test_loader)} batches...")
-
-    # 3. Iterate over dataset
-    for i_batch, test_data_blob in enumerate(tqdm(test_loader)):
-        
-        # Unpack data (test_data_blob is tuple (dict, bool))
-        batch_data = test_data_blob[0]
-        
-        rgb_images = batch_data['rgb_images'].float().cuda()        # (B, 2, 3, H, W)
-        depths = batch_data['depths'].float().cuda()                # (B, 2, H, W)
-        # depths_mask = batch_data['depths_mask'].float().cuda()
-        # metric_scale = batch_data['metric_scale'].float().cuda()
-        # c2w = batch_data['c2w'].float().cuda()
-        forward_depth = batch_data['forward_depth'].float().cuda()  # (B, 2, H, W)
-        forward_2dmotion = batch_data['forward_2dmotion'].float().cuda() # (B, 2, H, W, 2)
-        visibility = batch_data['visibility'].float().cuda()        # (B, 2, H, W)
-        intrinsics = batch_data['intrinsics'].float().cuda()        # (B, 2, 3, 3)
-        flow_valid = batch_data['valid'].cuda()                     # (B, 2, H, W)
-
-        # Prepare masks for the first frame (t=0)
-        flow_valid = flow_valid[:, 0]
-        visibility = visibility[:, 0]
-        # Note: Original code commented out visibility check, keeping it consistent
-        # flow_valid = flow_valid & (visibility==1)
-        
-        H, W = rgb_images.shape[-2], rgb_images.shape[-1]
-        
-        # 4. Model Inference
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
-            output = model.infer_pair(
-                rgb_images, 
-                iters=4, 
-                sw=None, 
-                is_training=False, 
-                tracking3d=True, 
-                force_projection=True, 
-                apply_mask=False,
-                aligned_scene_flow=False
-            )
-        
-        # 5. Process Predictions
-        # Normalize GT 2D motion to pixel coordinates (if it was normalized)
-        # Based on original code:
-        forward_2dmotion[..., 0] /= W
-        forward_2dmotion[..., 1] /= H
-        
-        # Extract predictions
-        pred_2d_motion = output[1]['flow_2d'][:, 0].permute(0, 2, 3, 1) # (B, H, W, 2)
-        pred_points = output[0]['points'][:, 0]
-        pred_flow3d = output[1]['flow_3d'][:, 0]
-        pred_3dmotion = pred_flow3d - pred_points
-
-        # 6. Process Ground Truth
-        # Unproject GT flow to 3D
-        gt_3dflow = utils3d.torch.unproject_cv(
-            forward_2dmotion, 
-            forward_depth, 
-            intrinsics=intrinsics[..., None, :, :], 
-            use_ray=True
-        )
-        
-        # Restore 2D motion to pixel units for metric calculation
-        forward_2dmotion[..., 0] *= W
-        forward_2dmotion[..., 1] *= H 
-        forward_2dmotion = forward_2dmotion[:, 0]
-        
-        # Get GT 3D points from depth
-        gt_points = utils3d.torch.depth_to_points(depths, intrinsics=intrinsics, use_ray=True)
-        
-        # 7. Prepare Data for Alignment
-        gt = torch.cat([gt_points[:, 0], gt_3dflow[:, 0]], dim=0)
-        pred = torch.cat([pred_points, pred_flow3d], dim=0)
-        valid = torch.cat([flow_valid, flow_valid], dim=0)
-        
-        gt_3dmotion = gt_3dflow[:, 0] - gt_points[:, 0]
-
-        # 8. Alignment (Scale & Shift)
-        # Monocular methods often lack absolute scale, so we align predictions to GT.
-        # We use a low-resolution mask-aware resize to speed up alignment calculation.
-        _, lr_mask, lr_index = mask_aware_nearest_resize(None, valid, (32, 32), return_index=True)
-        
-        pred_points_lr_masked = pred[lr_index][lr_mask]
-        gt_points_lr_masked = gt[lr_index][lr_mask]
-        
-        # Calculate alignment parameters
-        scale, shift = align_points_scale_xyz_shift(
-            pred_points_lr_masked, 
-            gt_points_lr_masked, 
-            1 / (gt_points_lr_masked.norm(dim=-1) + 1e-6), 
-            exp=10
-        )
-        
-        # Apply alignment
-        pred_aligned = pred * scale + shift
-        pred_3dmotion_aligned = pred_3dmotion * scale
-
-        # 9. Compute Metrics
-        count_all += flow_valid.sum()
-        
-        metrics_sf = compute_scene_flow_metrics(pred_3dmotion_aligned, gt_3dmotion, flow_valid)
-        metrics_of = compute_optical_flow_metrics(pred_2d_motion, forward_2dmotion, flow_valid)
-        metrics_pc = compute_pc_metrics(pred_aligned, gt, valid)
-
-        # Accumulate results
-        for key, val in metrics_of.items():    
-            metrics_all[key] += 0 if math.isnan(val) else val
-        for key, val in metrics_sf.items():
-            metrics_all[key] += 0 if math.isnan(val) else val
-        for key, val in metrics_pc.items():
-            metrics_all[key] += 0 if math.isnan(val) else val
-
-        # 10. Print Final Results
-        logger.info("Evaluation Complete. Results:")
-        table = PrettyTable(['Metric', 'Value'])
-        
-        for key in metrics_all:
-            if key in ["abs_rel", "threshold_1"]:
-                # These metrics were calculated on concatenated (points + flow), so divide by 2*count
-                val = metrics_all[key] / (2 * count_all)
-            else:
-                val = metrics_all[key] / count_all
-            table.add_row([key, f"{val:.4f}"])
-        
-        print(table)
-
-@torch.inference_mode()
 def test_blinkvision(model: torch.nn.Module, args: argparse.Namespace):
-    """
-    Main evaluation loop for Scene Flow and Optical Flow.
-    """
-    # 1. Setup Data Loader
     loader_args = {'batch_size': 1, 'shuffle': False, 'num_workers': 4, 'drop_last': False}
     test_dataset = BlinkvisionflowDataset(root='evaluation/flow/blinkvision')
     test_loader = DataLoader(test_dataset, **loader_args)
-
-    # 2. Initialize Metrics Accumulator
-    count_all = 0
-    metrics_all = {
-        'EPE3D': 0.0, 'Acc3D_strict': 0.0, 'Acc3D_relax': 0.0, 'Outlier': 0.0, 
-        "EPE2D": 0.0, "ACC1_2D": 0.0, "ACC3_2D": 0.0, "Outlier_2D": 0.0,
-        "abs_rel": 0.0, "threshold_1": 0.0
-    }
-
-    logger.info(f"Starting evaluation with {len(test_loader)} batches...")
-
-    # 3. Iterate over dataset
-    for i_batch, test_data_blob in enumerate(tqdm(test_loader)):
-        # Unpack and move to GPU
-        # Note: test_data_blob is a tuple (dict, bool) due to dataset implementation
-        batch_data = test_data_blob[0]
-        
-        rgb_images = batch_data['rgb_images'].float().cuda()        # (B, 2, 3, H, W)
-        depths = batch_data['depths'].float().cuda()                # (B, 2, H, W)
-        forward_depth = batch_data['forward_depth'].float().cuda()  # (B, 2, H, W)
-        forward_2dmotion = batch_data['forward_2dmotion'].float().cuda() # (B, 2, H, W, 2)
-        visibility = batch_data['visibility'].float().cuda()        # (B, 2, H, W)
-        intrinsics = batch_data['intrinsics'].float().cuda()        # (B, 2, 3, 3)
-        flow_valid = batch_data['valid'].cuda()                     # (B, 2, H, W)
-
-        # Prepare masks for the first frame (t=0)
-        flow_valid = flow_valid[:, 0]
-        visibility = visibility[:, 0]
-        flow_valid = flow_valid & (visibility == 1)
-        
-        H, W = rgb_images.shape[-2], rgb_images.shape[-1]
-        
-        # 4. Model Inference
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
-            output = model.infer_pair(
-                rgb_images, 
-                iters=4, 
-                sw=None, 
-                is_training=False, 
-                tracking3d=True, 
-                force_projection=True, 
-                apply_mask=False
-            )
-        
-        # 5. Process Predictions
-        # Normalize GT 2D motion to pixel coordinates (if it was normalized)
-        # Note: The dataset normalized intrinsics, so we might need to check if motion needs scaling.
-        # Based on original code:
-        forward_2dmotion[..., 0] /= W
-        forward_2dmotion[..., 1] /= H
-        
-        # Extract predictions
-        pred_2d_motion = output[1]['flow_2d'][:, 0].permute(0, 2, 3, 1) # (B, H, W, 2)
-        pred_points = output[0]['points'][:, 0]  
-        pred_flow3d = output[1]['flow_3d'][:, 0]
-        pred_3dmotion = output[1]['flow_3d'][:, 0] - output[0]['points'][:, 0]
-
-        # 6. Process Ground Truth
-        # Unproject GT flow to 3D
-        gt_3dflow = utils3d.torch.unproject_cv(
-            forward_2dmotion, 
-            forward_depth, 
-            intrinsics=intrinsics[..., None, :, :], 
-            use_ray=False
-        )
-        
-        # Restore 2D motion to pixel units for metric calculation
-        forward_2dmotion[..., 0] *= W
-        forward_2dmotion[..., 1] *= H 
-        forward_2dmotion = forward_2dmotion[:, 0]
-        
-        # Get GT 3D points from depth
-        gt_points = utils3d.torch.depth_to_points(depths, intrinsics=intrinsics, use_ray=False)
-
-        # 7. Prepare Data for Alignment
-        # Concatenate points and flow for unified alignment
-        gt = torch.cat([gt_points[:, 0], gt_3dflow[:, 0]], dim=0)
-        pred = torch.cat([pred_points, pred_flow3d], dim=0)
-        valid = torch.cat([flow_valid, flow_valid], dim=0)
-        
-        gt_3dmotion = gt_3dflow[:, 0] - gt_points[:, 0]
-
-        # 8. Alignment (Scale & Shift)
-        # Monocular methods often lack absolute scale, so we align predictions to GT.
-        # We use a low-resolution mask-aware resize to speed up alignment calculation.
-        _, lr_mask, lr_index = mask_aware_nearest_resize(None, valid, (32, 32), return_index=True)
-        
-        pred_points_lr_masked = pred[lr_index][lr_mask]
-        gt_points_lr_masked = gt[lr_index][lr_mask]
-        
-        # Calculate alignment parameters
-        scale, shift = align_points_scale_xyz_shift(
-            pred_points_lr_masked, 
-            gt_points_lr_masked, 
-            1 / (gt_points_lr_masked.norm(dim=-1) + 1e-6), 
-            exp=20
-        )
-        
-        # Apply alignment
-        pred_aligned = pred * scale + shift
-        pred_3dmotion_aligned = pred_3dmotion * scale
-
-        # 9. Compute Metrics
-        count_all += flow_valid.sum()
-        
-        metrics_sf = compute_scene_flow_metrics(pred_3dmotion_aligned, gt_3dmotion, flow_valid)
-        metrics_of = compute_optical_flow_metrics(pred_2d_motion, forward_2dmotion, flow_valid)
-        metrics_pc = compute_pc_metrics(pred_aligned, gt, valid)
-
-        # Accumulate (handling NaNs)
-        for key, val in metrics_of.items():    
-            metrics_all[key] += 0 if math.isnan(val) else val
-            
-        for key, val in metrics_sf.items():
-            metrics_all[key] += 0 if math.isnan(val) else val
-            
-        for key, val in metrics_pc.items():
-            metrics_all[key] += 0 if math.isnan(val) else val
-
-    # 10. Print Final Results
-    logger.info("Evaluation Complete. Results:")
-    table = PrettyTable(['Metric', 'Value'])
     
-    for key in metrics_all:
-        if key in ["abs_rel", "threshold_1"]:
-            # These metrics were calculated on concatenated (points + flow), so divide by 2*count
-            val = metrics_all[key] / (2 * count_all)
-        else:
-            val = metrics_all[key] / count_all
-        table.add_row([key, f"{val:.4f}"])
-    
-    print(table)
+    # BlinkVision: use_ray=False, check_visibility=True, exp=20
+    processor = lambda b: _process_kubric_blink_batch(b, use_ray=False, check_visibility=True)
+    _evaluate_model(model, 
+        test_loader, 
+        processor, 
+        alignment_exp=20, 
+        aligned_scene_flow=True
+    )
 
 # ==============================================================================
 # Main Entry Point

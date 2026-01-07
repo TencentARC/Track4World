@@ -55,15 +55,15 @@ Run the following commands to evaluate flow estimation on different datasets:
 
 **BlinkVision & KITTI:**
 ```bash
-python evaluation/flow/eval_blinkvision.py
-python evaluation/flow/eval_kitti.py
+python evaluation/flow/eval.py --dataset kitti
+python evaluation/flow/eval.py --dataset blinkvision
 ```
 
 **Kubric:**
-Evaluate on different sequence lengths (`0` for short, `1` for long):
+Evaluate on different sequence lengths:
 ```bash
-python evaluation/flow/eval_kubric.py --len_level 0
-python evaluation/flow/eval_kubric.py --len_level 1
+python evaluation/flow/eval.py --dataset kubric_short
+python evaluation/flow/eval.py --dataset kubric_long
 ```
 
 ---

@@ -480,7 +480,7 @@ def forward_video3d_ff(rgbs: torch.Tensor, model: torch.nn.Module, args) -> Dict
     T_selected = len(select_views)
 
     with torch.autocast(device_type='cuda', dtype=torch.float32):
-        output = model.infer(
+        output, _ = model.infer(
             rgbs_selected, 
             iters=args.inference_iters, 
             sw=None, 

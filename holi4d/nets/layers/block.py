@@ -49,15 +49,13 @@ class Block(nn.Module):
         attn_class: Callable[..., nn.Module] = Attention,
         ffn_layer: Callable[..., nn.Module] = Mlp,
         qk_norm: bool = False,
-        fused_attn: bool = True,  # whether to use scaled_dot_product_attention
-        rope=None,                # rotary positional embedding (optional)
+        fused_attn: bool = True,
+        rope=None,
     ) -> None:
         super().__init__()
 
-        # Pre-norm before attention
+        # 1. Attention Branch
         self.norm1 = norm_layer(dim)
-
-        # Multi-head self-attention module
         self.attn = attn_class(
             dim,
             num_heads=num_heads,
@@ -69,68 +67,67 @@ class Block(nn.Module):
             fused_attn=fused_attn,
             rope=rope,
         )
-
-        # LayerScale and stochastic depth for attention branch
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        # Pre-norm before FFN
+        # 2. MLP Branch
         self.norm2 = norm_layer(dim)
-
-        # Feed-forward network
-        mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = ffn_layer(
             in_features=dim,
-            hidden_features=mlp_hidden_dim,
+            hidden_features=int(dim * mlp_ratio),
             act_layer=act_layer,
             drop=drop,
             bias=ffn_bias,
         )
-
-        # LayerScale and stochastic depth for FFN branch
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        # Drop-path ratio used for sample-wise stochastic depth
+        # 3. Drop Path Configuration
         self.sample_drop_ratio = drop_path
+        # Pre-calculate condition to avoid repeated checks in forward
+        self.use_optimized_drop = (drop_path > 0.1)
 
-    def forward(self, x: Tensor, pos=None) -> Tensor:
+    def _forward_attn(self, x: Tensor, pos=None) -> Tensor:
+        """Helper to compute the attention residual content."""
+        return self.ls1(self.attn(self.norm1(x), pos=pos))
+
+    def _forward_mlp(self, x: Tensor) -> Tensor:
+        """Helper to compute the MLP residual content."""
+        return self.ls2(self.mlp(self.norm2(x)))
+
+    def forward(self, hidden_states: Tensor, pos=None) -> Tensor:
         """
         Args:
-            x: Input tensor of shape (B, N, C)
-            pos: Optional positional encoding (e.g., RoPE)
-
-        Returns:
-            Output tensor with the same shape as x
+            hidden_states: Input tensor of shape (B, N, C)
+            pos: Optional positional encoding
         """
-
-        def attn_residual_func(x: Tensor, pos=None) -> Tensor:
-            return self.ls1(self.attn(self.norm1(x), pos=pos))
-
-        def ffn_residual_func(x: Tensor) -> Tensor:
-            return self.ls2(self.mlp(self.norm2(x)))
-
-        if self.training and self.sample_drop_ratio > 0.1:
-            # the overhead is compensated only for a drop path rate larger than 0.1
-            x = drop_add_residual_stochastic_depth(
-                x,
+        
+        # --- Attention Block ---
+        if self.training and self.use_optimized_drop:
+            # Optimized path for high drop rates (fused drop+add)
+            hidden_states = drop_add_residual_stochastic_depth(
+                hidden_states,
                 pos=pos,
-                residual_func=attn_residual_func,
+                residual_func=self._forward_attn,
                 sample_drop_ratio=self.sample_drop_ratio,
             )
-            x = drop_add_residual_stochastic_depth(
-                x,
-                residual_func=ffn_residual_func,
-                sample_drop_ratio=self.sample_drop_ratio,
-            )
-        elif self.training and self.sample_drop_ratio > 0.0:
-            x = x + self.drop_path1(attn_residual_func(x, pos=pos))
-            x = x + self.drop_path1(ffn_residual_func(x))  # FIXME: drop_path2
         else:
-            x = x + attn_residual_func(x, pos=pos)
-            x = x + ffn_residual_func(x)
-        return x
+            # Standard path
+            hidden_states = hidden_states + self.drop_path1(self._forward_attn(hidden_states, pos=pos))
 
+        # --- MLP Block ---
+        if self.training and self.use_optimized_drop:
+            # Optimized path
+            hidden_states = drop_add_residual_stochastic_depth(
+                hidden_states,
+                residual_func=self._forward_mlp,
+                sample_drop_ratio=self.sample_drop_ratio,
+            )
+        else:
+            # Standard path
+            hidden_states = hidden_states + self.drop_path2(self._forward_mlp(hidden_states))
+
+        return hidden_states
 
 def drop_add_residual_stochastic_depth(
     x: Tensor,

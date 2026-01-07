@@ -359,7 +359,7 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
 
                 # Run Model Inference
                 if first_positive_ind < T - 1:
-                    output, eval_dict = model.evaluation(
+                    output, eval_dict = model.infer(
                         rgbs[:, first_positive_ind:], 
                         iters=4, 
                         sw=None, 

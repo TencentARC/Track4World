@@ -1351,7 +1351,7 @@ class Holi4D(nn.Module):
             fmaps3d_detail_anchor = fmaps3d_detail[:, 0]
             
             (flow_predictions, flow3d_predictions, visconf_predictions, 
-             flows8, flow3ds8, feats8) = self.forward_window_unified(
+            flows8, flow3ds8, feats8) = self.forward_window_unified(
                 fmap1_single=fmap_anchor, fmap2=fmaps[:, 1:2], 
                 fmaps3d_detail1_single=fmaps3d_detail_anchor, 
                 fmaps3d_detail2=fmaps3d_detail[:, 1:2],
@@ -1441,7 +1441,7 @@ class Holi4D(nn.Module):
 
             # Solve window
             (flow_predictions, flow3d_predictions, visconf_predictions, 
-             flows8, flow3ds8, feats8) = self.forward_window_unified(
+            flows8, flow3ds8, feats8) = self.forward_window_unified(
                 fmap1_single=fmap_anchor, fmap2=fmaps2, 
                 fmaps3d_detail1_single=fmaps3d_detail_anchor, 
                 fmaps3d_detail2=fmaps3d_detail2,
@@ -2091,6 +2091,7 @@ class Holi4D(nn.Module):
         current_batch_size: int = 4,
         local: bool = False, 
         no_shift: bool = False,
+        eval_dict=None
     ) -> Dict[str, torch.Tensor]:
         """
         Perform standard inference on a batch of video frames and output metric 3D geometry.
@@ -2114,6 +2115,7 @@ class Holi4D(nn.Module):
             use_fp16: Whether mixed-precision inference is enabled.
             current_batch_size: Effective batch size used internally.
             local / no_shift: Reserved flags for alternative inference behaviors.
+            eval_dict: Optional cache for reusing computed features.
 
         Outputs:
             A dictionary containing:
@@ -2125,13 +2127,14 @@ class Holi4D(nn.Module):
                 - flow_3d: Dense 3D scene flow in metric space.
                 - world_points: 3D points in a global/world coordinate system.
                 - camera_poses: Estimated camera poses for each frame.
+                - eval_dict: Updated feature cache for future reuse.
         """
         # Run the model forward pass using a sliding-window strategy if needed.
         (
             flows_e, visconf_maps_e, _, _, flows3d_e, _, 
-            points, mask, _, world_points, camera_poses
+            points, mask, eval_dict, world_points, camera_poses
         ) = self.forward_sliding(
-            images, iters=iters, sw=sw, is_training=is_training, tracking3d=tracking3d
+            images, iters=iters, sw=sw, is_training=is_training, tracking3d=tracking3d, eval_dict=eval_dict
         )
         
         B, T, C, H, W = images.shape
@@ -2256,177 +2259,7 @@ class Holi4D(nn.Module):
                 'mask': mask_binary
             })
 
-        return return_dict
-
-
-    @torch.inference_mode()
-    def evaluation(
-        self, 
-        images, 
-        iters=4, 
-        sw=None, 
-        is_training=False, 
-        window_len=None, 
-        stride=None, 
-        tracking3d=False, 
-        apply_mask: bool = False,
-        force_projection: bool = True, 
-        use_fp16: bool = True, 
-        current_batch_size: int = 4,
-        local: bool = False, 
-        no_shift: bool = False, 
-        eval_dict=None
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Run evaluation on an input video batch and return structured geometric outputs.
-
-        This function is conceptually similar to `infer`, but is designed for evaluation
-        scenarios where intermediate features (stored in `eval_dict`) may be reused
-        across multiple runs on the same sequence to avoid redundant computation.
-
-        Inputs:
-            images: Tensor of shape (B, T, C, H, W), representing a batch of video clips.
-            iters: Number of refinement iterations for the underlying model.
-            sw: Optional sliding-window configuration.
-            is_training: Flag indicating whether the model is in training mode.
-            window_len / stride: Sliding window parameters (if applicable).
-            tracking3d: Whether to additionally estimate dense 3D motion.
-            apply_mask: If True, invalid regions are masked out using infinite values.
-            force_projection: If True, explicitly re-project depth to 3D points using intrinsics.
-            use_fp16: Whether mixed precision is enabled.
-            current_batch_size: Effective batch size during evaluation.
-            local / no_shift: Flags controlling evaluation behavior (kept for compatibility).
-            eval_dict: Optional cache for reusing computed features.
-
-        Outputs:
-            return_dict: A list of dictionaries containing reconstructed geometry,
-                        motion, camera intrinsics, and validity masks.
-            eval_dict: Updated feature cache for future reuse.
-        """
-        (
-            flows_e, visconf_maps_e, _, _, flows3d_e, _, 
-            points, mask, eval_dict, _, _
-        ) = self.forward_sliding(
-            images, iters=iters, sw=sw, is_training=is_training, 
-            tracking3d=tracking3d, eval_dict=eval_dict
-        )
-        
-        B, T, C, H, W = images.shape
-        aspect_ratio = W / H
-        
-        # Generate a dense 2D pixel grid in image coordinates (unnormalized),
-        # which will later be used to convert optical flow into absolute positions.
-        grid_xy = holi4d.utils.basic.gridcloud2d(1, H, W, norm=False, device='cuda:0').float()
-        grid_xy = grid_xy.permute(0, 2, 1).reshape(1, 1, 2, H, W)
-        
-        # Convert predicted 2D flow from displacement form to absolute pixel locations.
-        flow2d = flows_e.to(torch.float32).cuda() + grid_xy 
-        visconf_maps_e = visconf_maps_e.to(torch.float32)
-        
-        # Convert predicted 3D flow into absolute 3D positions by adding reference points.
-        flow3d = flows3d_e.to(torch.float32).cuda() + points[None, 0:1]
-        flow3d = flow3d.permute(0, 1, 3, 4, 2)
-        
-        return_dict = []
-        
-        # Reformat point cloud and mask tensors to (B, T, H, W, C) layout
-        # for more convenient downstream processing.
-        points = points[None].permute(0, 1, 3, 4, 2)[:, :T]
-        mask = mask[None].permute(0, 1, 3, 4, 2)[..., 0][:, :T]
-        
-        # Keep a copy of 2D flow in (B, T, H, W, 2) format for projection steps.
-        flow2d_c = flow2d.clone()
-        flow2d_c = flow2d_c.permute(0, 1, 3, 4, 2)
-
-        with torch.autocast(device_type=self.device.type, dtype=torch.float32):
-            # Ensure all tensors are in float32 for numerically stable geometry computation.
-            points, mask = map(
-                lambda x: x.float() if isinstance(x, torch.Tensor) else x, 
-                [points, mask]
-            )
-            
-            # Convert soft mask into a binary validity mask.
-            mask_binary = mask > self.mask_threshold
-            
-            # Estimate global focal length and depth shift from visible 3D points.
-            focal, shift = recover_global_focal_shift(points, mask_binary)
-
-            # Recover camera intrinsics (fx, fy) assuming normalized principal point (0.5, 0.5).
-            fx = focal / 2 * (1 + aspect_ratio ** 2) ** 0.5 / aspect_ratio
-            fy = focal / 2 * (1 + aspect_ratio ** 2) ** 0.5
-            intrinsics = utils3d.torch.intrinsics_from_focal_center(
-                fx, fy, 0.5, 0.5
-            ).repeat(1, flow3d.shape[1], 1, 1)
-            
-            # Apply the estimated global depth shift to obtain absolute depth values.
-            depth = points[..., 2] + shift[..., None, None, None].repeat(
-                1, points.shape[1], 1, 1
-            )
-
-            if force_projection:
-                # Reconstruct 3D points explicitly from depth and camera intrinsics.
-                points = utils3d.torch.depth_to_points(
-                    depth, intrinsics=intrinsics, use_ray=False
-                )
-            else:
-                # Alternatively, directly shift the existing 3D points along the z-axis.
-                shift_vec = torch.stack(
-                    [torch.zeros_like(shift), torch.zeros_like(shift), shift], dim=-1
-                )
-                points = points + shift_vec[..., None, None, None, :]
-
-            if apply_mask:
-                # Mask out invalid regions by assigning infinite values,
-                # making them easy to ignore in later processing.
-                points = torch.where(mask_binary[..., None], points, torch.inf)
-                depth = torch.where(mask_binary, depth, torch.inf)
-
-            # Store reconstructed geometry for the reference frame(s).
-            return_dict.append({
-                'points': points, 
-                'intrinsics': intrinsics, 
-                'depth': depth, 
-                'mask': mask_binary
-            })
-            
-            # Compute forward depth by applying the same global shift to the predicted 3D flow.
-            forward_depth = flow3d[..., 2] + shift[..., None, None, None].repeat(
-                1, flow3d.shape[1], 1, 1
-            )
-            
-            if force_projection:
-                # Normalize 2D coordinates before unprojection.
-                flow2d_c[..., 0] /= flow2d_c.shape[-2]
-                flow2d_c[..., 1] /= flow2d_c.shape[-3]
-                
-                # Unproject 2D positions with depth into 3D space.
-                points_f = utils3d.torch.unproject_cv(
-                    flow2d_c, forward_depth, 
-                    intrinsics=intrinsics[..., None, :, :], use_ray=False
-                )
-            else:
-                # Directly apply the depth shift to the 3D flow representation.
-                shift_vec = torch.stack(
-                    [torch.zeros_like(shift), torch.zeros_like(shift), shift], dim=-1
-                )
-                points_f = flow3d + shift_vec[..., None, None, None, :]
-
-            # Restore pixel-scale coordinates after unprojection.
-            flow2d_c[..., 0] *= flow2d_c.shape[-2]
-            flow2d_c[..., 1] *= flow2d_c.shape[-3]
-            
-            # Store motion-related outputs for evaluation.
-            return_dict.append({
-                'flow_3d': points_f, 
-                'flow_2d': flow2d, 
-                'visconf_maps_e': visconf_maps_e, 
-                'intrinsics': intrinsics, 
-                'depth': forward_depth, 
-                'mask': mask_binary
-            })
-
         return return_dict, eval_dict
-
 
     @torch.inference_mode()
     def infer_pair(

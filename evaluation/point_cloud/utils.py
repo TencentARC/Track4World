@@ -3,6 +3,7 @@ import sys
 import itertools
 import re
 import io
+import json
 import argparse
 from pathlib import Path
 from typing import List, Dict, Union, Optional, Tuple
@@ -23,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 # Custom Project Imports
 from holi4d.nets.model import Holi4D
+from demo import load_model
 
 # ==============================================================================
 # Configuration & Logging
@@ -313,3 +315,169 @@ def load_scene_input(
         selected_views = np.arange(start_frame, min(end_frame, len(video_list)))
 
     return video_tensor, selected_views
+
+def get_shared_args():
+    """
+    Defines the superset of arguments required for both tasks.
+    """
+    parser = argparse.ArgumentParser(description="Holi4D Inference and Evaluation Script")
+
+    # --- Model & Environment ---
+    parser.add_argument("--ckpt_init", type=str, default="./checkpoints/holi4d.pth", help="Path to pretrained model checkpoint")
+    parser.add_argument("--config_path", type=str, default="./holi4d/config/eval/v1.json", help="Path to model config JSON")
+    parser.add_argument("--output", "-o", dest="output_path", type=str, default='./output_eval', help="Output directory")
+    parser.add_argument("--device", dest="device_name", type=str, default='cuda', help="Computation device")
+    parser.add_argument("--fp16", action='store_true', help="Enable half-precision (float16)")
+    
+    # --- Data & Input ---
+    parser.add_argument("--resize-to", type=int, default=512, help="Resize short edge to this resolution")
+    parser.add_argument("--frames", type=str, default='0-150', help="Frame range 'start-end'")
+    # Merged choices from both scripts
+    parser.add_argument("--gt-dataset-type", type=str, default='Sintel', 
+                        choices=['Tum', 'Bonn', 'Sintel', 'Scannet', 'Monkaa', 'Kubric-3D', 'KITTI', 'GMUKitchens'], 
+                        help="Ground truth dataset format")
+    
+    # --- Inference Parameters ---
+    parser.add_argument("--fov_x", dest="fov_x_", type=float, default=None, help="Horizontal FOV")
+    parser.add_argument("--resolution_level", type=int, default=0, help="Detail level [0-9]")
+    parser.add_argument("--num_tokens", type=int, default=None, help="Explicit token count")
+    parser.add_argument("--max-depth", type=float, default=70.0, help="Max depth threshold for metrics")
+    parser.add_argument("--coordinate", type=str, default='camera_base', choices=['camera_base', 'world_pi3', 'world_depthanythingv3'])
+    parser.add_argument("--chunk_size", type=int, default=130, help="Temporal chunk size")
+
+    return parser.parse_args()
+
+def run_evaluation_pipeline(args, task_config):
+    """
+    Generic pipeline for running inference and evaluation.
+    
+    Args:
+        args: Parsed arguments.
+        task_config (dict): Configuration specific to the task (Point vs Depth).
+            - target_key: Key to extract from model output ('points' or 'depth').
+            - gt_loader: Function to load ground truth.
+            - eval_fn: Function to calculate metrics.
+            - metric_header: String for the results text file header.
+    """
+    # 1. Setup
+    torch.set_grad_enabled(False)
+
+    if not os.path.exists(args.config_path):
+        logger.error(f"Config file not found: {args.config_path}")
+        sys.exit(1)
+    with open(args.config_path, "r") as f:
+        config = json.load(f)
+
+    # 2. Load Model
+    model = load_model(args, config)
+    device = torch.device(args.device_name)
+
+    # 3. Prepare Data Paths
+    logger.info(f"Output will be saved to: {args.output_path}")
+    input_paths = get_scene_paths(args.gt_dataset_type)
+    if not input_paths:
+        logger.error("No scenes found. Exiting.")
+        sys.exit(1)
+
+    # 4. Process Scenes
+    for input_path in tqdm(input_paths, desc="Processing scenes"):
+        torch.cuda.empty_cache()
+        input_name = input_path.stem
+        
+        # Create unique output directory
+        base_path = Path(args.output_path) / input_name
+        save_path = base_path
+        counter = 1
+        while save_path.exists():
+            save_path = Path(f"{str(base_path)}_{counter}")
+            counter += 1
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        # Parse frame range
+        try:
+            start_frame, end_frame = map(int, args.frames.split('-'))
+        except ValueError:
+            logger.error(f"Invalid frame range format: {args.frames}. Use 'start-end'.")
+            continue
+
+        # --- Load Input ---
+        try:
+            video_tensor, selected_views = load_scene_input(input_path, args, device, start_frame, end_frame)
+        except Exception as e:
+            logger.error(f"Failed to load input for {input_name}: {e}")
+            continue
+
+        # --- Run Inference ---
+        logger.info(f"Running inference on {input_name} ({video_tensor.shape[0]} frames)...")
+        
+        all_preds = []
+        
+        # Process in chunks
+        for i in range(0, video_tensor.shape[0], args.chunk_size):
+            chunk_video = video_tensor[i : i + args.chunk_size]
+            
+            output = model.infer_pure_point(
+                chunk_video,
+                fov_x=args.fov_x_,
+                resolution_level=args.resolution_level,
+                num_tokens=args.num_tokens,
+                use_fp16=args.fp16,
+                current_batch_size=1
+            )
+            
+            # Extract specific key (points or depth) and move to CPU
+            pred_chunk = output[0][task_config['target_key']].cpu().numpy()
+            all_preds.append(pred_chunk)
+            torch.cuda.empty_cache()
+
+        # Concatenate results: (N, H, W, C)
+        pred_data = np.concatenate(all_preds, axis=1).squeeze(0)
+
+        # --- Evaluation ---
+        logger.info("Loading ground truth for evaluation...")
+        try:
+            # Call the specific GT loader
+            gt_data, gt_mask = task_config['gt_loader'](input_path, args, selected_views, start_frame, end_frame)
+        except Exception as e:
+            logger.warning(f"Failed to load GT for {input_name}: {e}. Skipping evaluation.")
+            gt_data = None
+
+        if gt_data is not None:
+            gt_h, gt_w = gt_data.shape[1], gt_data.shape[2]
+            
+            # Resize predictions to match GT resolution
+            pred_data_resized = np.array([
+                cv2.resize(pred, (gt_w, gt_h), cv2.INTER_NEAREST) for pred in pred_data
+            ])
+            
+            logger.info("Calculating metrics...")
+            
+            mask_pre = (gt_mask == 1) if gt_mask is not None else None
+            eval_max_depth = 30.0 if args.gt_dataset_type == 'Kubric-3D' else args.max_depth
+
+            # Call the specific evaluation function
+            eval_results, _ = task_config['eval_fn'](
+                pred_data_resized, 
+                gt_data, 
+                max_depth=eval_max_depth, 
+                use_gpu=True, 
+                mask_pre=mask_pre
+            )
+            
+            # Save Results
+            results_file = save_path / "evaluation_results.txt"
+            with open(results_file, "w") as f:
+                f.write(f"--- {task_config['metric_header']} ---\n")
+                f.write("-" * 35 + "\n")
+                f.write(f"{'Metric':<20}{'Value':<12}\n")
+                f.write("-" * 35 + "\n")
+                f.write(f"{'Abs_Rel':<20}{eval_results[0]:<12.6f}\n")
+                f.write(f"{'d1 < 1.25':<20}{eval_results[1]:<12.6f}\n")
+                f.write(f"{'Valid Pixels':<20}{int(eval_results[2])}\n")
+            
+            logger.info(f"Results saved to {results_file}")
+        else:
+            logger.warning("Skipping evaluation due to missing Ground Truth.")
+
+    # 5. Summarize
+    summarize_evaluation_results(args.output_path)

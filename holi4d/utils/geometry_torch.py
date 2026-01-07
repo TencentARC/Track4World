@@ -253,14 +253,14 @@ def recover_focal_shift(
     ### Parameters:
     - `points: torch.Tensor` of shape (..., H, W, 3)
     - `downsample_size: Tuple[int, int]` in (height, width), the size of the 
-       downsampled map. Downsampling produces approximate solution and is 
-       efficient for large maps.
+        downsampled map. Downsampling produces approximate solution and is 
+        efficient for large maps.
 
     ### Returns:
     - `focal`: torch.Tensor of shape (...) the estimated focal length, 
-       relative to the half diagonal of the map
+        relative to the half diagonal of the map
     - `shift`: torch.Tensor of shape (...) Z-axis shift to translate the 
-       point map to camera space
+        point map to camera space
     """
     shape = points.shape
     height, width = points.shape[-3], points.shape[-2]
