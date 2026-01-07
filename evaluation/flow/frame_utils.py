@@ -115,11 +115,18 @@ def readDPT(filename):
     check = np.fromfile(f,dtype=np.float32,count=1)[0]
     TAG_FLOAT = 202021.25
     TAG_CHAR = 'PIEH'
-    assert check == TAG_FLOAT, ' depth_read:: Wrong tag in flow file (should be: {0}, is: {1}). Big-endian machine? '.format(TAG_FLOAT,check)
+    # Check if the flow file tag matches the expected float tag (sanity check)
+    assert check == TAG_FLOAT, (
+        f"depth_read:: Wrong tag in flow file "
+        f"(should be: {TAG_FLOAT}, is: {check}). Big-endian machine?"
+    )
     width = np.fromfile(f,dtype=np.int32,count=1)[0]
     height = np.fromfile(f,dtype=np.int32,count=1)[0]
     size = width*height
-    assert width > 0 and height > 0 and size > 1 and size < 100000000, ' depth_read:: Wrong input size (width = {0}, height = {1}).'.format(width,height)
+    # Verify that the input image dimensions and total file size are within valid ranges
+    assert (width > 0 and height > 0 and 1 < size < 100_000_000), (
+        f"depth_read:: Wrong input size (width = {width}, height = {height})."
+    )
     depth = np.fromfile(f,dtype=np.float32,count=-1).reshape((height,width))
     return depth
 

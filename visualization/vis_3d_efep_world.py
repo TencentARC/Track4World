@@ -8,14 +8,14 @@ import matplotlib.pyplot as plt
 import open3d as o3d
 import viser
 from tqdm.auto import tqdm
-
+from vis_3d_efep import remove_std_outlier_open3d
 # ==============================================================================
 # Global Constants
 # ==============================================================================
 DEFAULT_POINT_DOWNSAMPLE_RATE = 10  # Downsample rate for trajectories
 STATIC_SKIP_FRAMES = 5             # Skip frames for accumulating static points
 STATIC_VOXEL_SIZE = 0.02           # Voxel size for downsampling static background
-MAX_DISPLACEMENT = 1.0             # Maximum displacement for trajectory segments
+MAX_DISPLACEMENT = 0.5            # Maximum displacement for trajectory segments
 DEFAULT_CAM_POS = (4.34, 0.34, 4.74)
 DEFAULT_LOOK_AT = (0.0, 0.0, 0.0)
 DEFAULT_UP = (0.33, 0.0, 0.4)
@@ -111,6 +111,16 @@ def main(
         if i < traj_dyn_mask_raw.shape[0]:
             dyn_mask = traj_dyn_mask_raw[i] == 1
             visibility_mask[i] = mask & dyn_mask
+        pts = trajectories_3d[i][visibility_mask[i]]
+        _, ind = remove_std_outlier_open3d(pts)
+        # Update mask based on inliers
+        mask = visibility_mask[i].copy()
+        valid_indices = np.where(mask)[0]
+        new_mask = np.zeros_like(mask, dtype=bool)
+        if ind.shape[0] > 0:
+            filtered_indices = valid_indices[ind]
+            new_mask[filtered_indices] = True
+        visibility_mask[i] = new_mask
 
     # --- 3. Load Point Clouds (Split Static/Dynamic) ---
     dynamic_point_nodes: List[viser.PointCloudHandle] = []
@@ -235,21 +245,57 @@ def main(
 
     # --- 6. GUI Controls ---
     with server.gui.add_folder("Playback"):
-        gui_static_point_size = server.gui.add_slider("Static Point Size", min=0.001, max=10, step=0.001, initial_value=0.01)
-        gui_dynamic_point_size = server.gui.add_slider("Dynamic Point Size", min=0.001, max=10, step=0.001, initial_value=0.01)
-        gui_line_width = server.gui.add_slider("Line width", min=0.1, max=5.0, step=0.1, initial_value=0.5)
-        gui_timestep = server.gui.add_slider("Timestep", min=0, max=num_frames - 1, step=1, initial_value=0)
+        # --- Point Cloud Appearance ---
+        # Controls size for stationary elements (e.g., walls, floors)
+        gui_static_point_size = server.gui.add_slider(
+            "Static Point Size", min=0.001, max=10, step=0.001, initial_value=0.01
+        )
+        # Controls size for moving elements (e.g., people, vehicles)
+        gui_dynamic_point_size = server.gui.add_slider(
+            "Dynamic Point Size", min=0.001, max=10, step=0.001, initial_value=0.01
+        )
+        # Controls the thickness of the 3D trajectory lines
+        gui_line_width = server.gui.add_slider(
+            "Line width", min=0.1, max=5.0, step=0.1, initial_value=0.5
+        )
+
+        # --- Playback Logic ---
+        gui_timestep = server.gui.add_slider(
+            "Timestep", min=0, max=num_frames - 1, step=1, initial_value=0
+        )
         gui_playing = server.gui.add_checkbox("Playing", True)
-        gui_framerate = server.gui.add_slider("FPS", min=1, max=60, step=0.1, initial_value=24)
+        gui_framerate = server.gui.add_slider(
+            "FPS", min=1, max=60, step=0.1, initial_value=24
+        )
+
+        # --- Visibility Toggles ---
         gui_show_static = server.gui.add_checkbox("Show Static Background", True)
         gui_show_dynamic = server.gui.add_checkbox("Show Dynamic Points", True)
         gui_show_traj = server.gui.add_checkbox("Show Dynamic Trajectories", True)
-        gui_max_traj_length = server.gui.add_slider("Trail Length", min=1, max=50, step=1, initial_value=5)
-        gui_max_displacement = server.gui.add_slider("Max Displacement", min=0.1, max=10.0, step=0.1, initial_value=MAX_DISPLACEMENT)
-        gui_cam_pos = server.gui.add_vector3("Position", initial_value=DEFAULT_CAM_POS, step=0.05)
-        gui_cam_look = server.gui.add_vector3("Look At", initial_value=DEFAULT_LOOK_AT, step=0.05)
-        gui_cam_up = server.gui.add_vector3("Up Direction", initial_value=DEFAULT_UP, step=0.05)
+
+        # --- Motion Analysis ---
+        # Number of historical frames to draw for trails
+        gui_max_traj_length = server.gui.add_slider(
+            "Trail Length", min=1, max=50, step=1, initial_value=5
+        )
+        # Threshold to filter out noise or limit motion visualization
+        gui_max_displacement = server.gui.add_slider(
+            "Max Displacement", min=0.1, max=10.0, step=0.1, initial_value=MAX_DISPLACEMENT
+        )
+
+        # --- Camera Controls ---
+        # Vector inputs for manual camera positioning
+        gui_cam_pos = server.gui.add_vector3(
+            "Position", initial_value=DEFAULT_CAM_POS, step=0.05
+        )
+        gui_cam_look = server.gui.add_vector3(
+            "Look At", initial_value=DEFAULT_LOOK_AT, step=0.05
+        )
+        gui_cam_up = server.gui.add_vector3(
+            "Up Direction", initial_value=DEFAULT_UP, step=0.05
+        )
         
+        # Action buttons for view management
         btn_reset_cam = server.gui.add_button("Reset to Default")
         btn_sync_from_view = server.gui.add_button("Sync from View")
 
@@ -333,10 +379,10 @@ def main(
                 line_node.points = np.zeros((0, 2, 3))
                 return history_pos, history_col
 
-            if t_curr < num_frames - 1:
-                pos_curr = 100 * trajectories_3d_down[t_curr]
-                pos_next = 100 * trajectories_3d_down[t_curr + 1]
-                valid_mask = visibility_mask_down[t_curr] & visibility_mask_down[t_curr + 1]
+            if t_curr < num_frames:
+                pos_curr = 100 * trajectories_3d_down[t_curr - 1]
+                pos_next = 100 * trajectories_3d_down[t_curr]
+                valid_mask = visibility_mask_down[t_curr - 1] & visibility_mask_down[t_curr]
                 
                 if np.any(valid_mask):
                     p1 = pos_curr[valid_mask]

@@ -233,8 +233,14 @@ def _scale_per_trajectory(gt_points, pred_points):
     return scaled_pred
 
 def compute_average_pts_within_thresh(
-    gt_points, pred_points, scaling="global", intrinsics_params=None, use_fixed_metric_threshold=False, pred_aligned=None, compute_epe=True
-    ):
+    gt_points, 
+    pred_points, 
+    scaling="global", 
+    intrinsics_params=None, 
+    use_fixed_metric_threshold=False, 
+    pred_aligned=None, 
+    compute_epe=True
+):
     """
     For the "metric-based" approach, we do either a global or per-trajectory scale,
     or a global Sim(3) alignment, then measure fraction of points within thresholds [1,2,4,8,16].

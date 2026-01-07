@@ -28,8 +28,10 @@ from tqdm import tqdm
 Hyper parameters
 """
 parser = argparse.ArgumentParser(description="Process a single video with Grounded SAM 2")
-parser.add_argument('--video-path', required=True, help="Path to the input video file (mp4, avi) or directory of frames")
-parser.add_argument('--text-prompt', required=True, help="Text prompts for detection, e.g., 'car. person. dog'")
+parser.add_argument('--video-path', required=True, 
+help="Path to the input video file (mp4, avi) or directory of frames")
+parser.add_argument('--text-prompt', required=True, 
+help="Text prompts for detection, e.g., 'car. person. dog'")
 parser.add_argument('--grounding-model', default="IDEA-Research/grounding-dino-base")
 parser.add_argument("--sam2-checkpoint", default="./checkpoints/sam2.1_hiera_large.pt")
 parser.add_argument("--sam2-model-config", default="configs/sam2.1/sam2.1_hiera_l.yaml")

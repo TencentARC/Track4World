@@ -32,7 +32,7 @@ def _generic_transform_sk_3d(transform, in_type='', out_type=''):
         input_ = input_.cpu()
         input_ = _convert(input_, in_type)
         
-        # CHW -> HWC for skimage
+        # CHW -> HWC for skimage processing
         input_np = input_.permute(1, 2, 0).detach().numpy()
         transformed = transform(input_np)
         
@@ -49,15 +49,21 @@ def _generic_transform_sk_3d(transform, in_type='', out_type=''):
     return apply_transform
 
 def get_2d_colors(xys, H, W):
-    N,D = xys.shape
-    assert(D==2)
+    """
+    Maps 2D coordinates to colors using a 2D colormap.
+    """
+    N, D = xys.shape
+    assert(D == 2)
     bremm = ColorMap2d()
-    xys[:,0] /= float(W-1)
-    xys[:,1] /= float(H-1)
+    
+    # Normalize coordinates to [0, 1]
+    xys[:, 0] /= float(W - 1)
+    xys[:, 1] /= float(H - 1)
+    
     colors = bremm(xys)
     return colors
 
-# Create specific transform function
+# Create specific transform function for HSV to RGB conversion
 hsv_to_rgb_torch = _generic_transform_sk_3d(hsv2rgb)
 
 def colorize(d, cmap_name='inferno'):
@@ -84,9 +90,9 @@ def colorize(d, cmap_name='inferno'):
     
     # Apply colormap: returns (N, 4) RGBA, we take RGB * 255
     color = np.array(color_map(d_flat)) * 255
-    color = color[:, :3] # Drop Alpha
+    color = color[:, :3] # Drop Alpha channel
     
-    # Reshape back to image
+    # Reshape back to image dimensions
     color = color.reshape(H, W, 3)
     color = torch.from_numpy(color).permute(2, 0, 1) # HWC -> CHW
     
@@ -131,14 +137,16 @@ def flow2color(flow, clip=0.0):
     if clip == 0:
         clip = torch.max(torch.abs(flow)).item()
         
-    # Normalize flow
+    # Normalize flow values
     flow = torch.clamp(flow, -clip, clip) / (clip + EPS)
     
-    radius = torch.sqrt(torch.sum(flow**2, dim=1, keepdim=True)) # Magnitude
+    # Compute magnitude and angle
+    radius = torch.sqrt(torch.sum(flow**2, dim=1, keepdim=True)) 
     radius_clipped = torch.clamp(radius, 0.0, 1.0)
     
-    angle = torch.atan2(-flow[:, 1:2], -flow[:, 0:1]) / np.pi # Angle
+    angle = torch.atan2(-flow[:, 1:2], -flow[:, 0:1]) / np.pi
     
+    # Map to HSV
     hue = torch.clamp((angle + 1.0) / 2.0, 0.0, 1.0)
     saturation = torch.ones_like(hue) * 0.75
     value = radius_clipped
@@ -176,7 +184,7 @@ def pca_embed(emb, keep, valid=None):
     """
     H, W = emb.shape[-2], emb.shape[-1]
     emb = emb + EPS
-    # B x H x W x C
+    # Convert to numpy: B x H x W x C
     emb_np = emb.permute(0, 2, 3, 1).cpu().detach().numpy() 
 
     if valid is not None:
@@ -197,8 +205,8 @@ def pca_embed(emb, keep, valid=None):
 
         # Handle case where valid pixels are too few for PCA
         if pixels_fit.shape[0] < keep:
-             emb_reduced.append(np.zeros([H, W, keep], dtype=np.float32))
-             continue
+            emb_reduced.append(np.zeros([H, W, keep], dtype=np.float32))
+            continue
 
         pca = PCA(n_components=keep)
         pca.fit(pixels_fit)
@@ -207,7 +215,7 @@ def pca_embed(emb, keep, valid=None):
         pixels_3d = pca.transform(pixels)
         
         if valid is not None:
-            # Re-apply mask logic if strictly needed, though usually handled by context
+            # Re-apply mask logic if strictly needed
             pass 
 
         out_img = pixels_3d.reshape(H, W, keep).astype(np.float32)
@@ -248,7 +256,6 @@ def pca_embed_together(emb, keep):
 def get_feat_pca(feat, valid=None):
     """Wrapper to perform PCA on features and normalize."""
     # feat: B, C, D, W (or similar)
-    # Note: reduce_emb logic was embedded here
     keep = 4
     
     # Use the "together" version for batch consistency
@@ -272,7 +279,8 @@ class ColorMap2d:
             self._height, self._width = self._img.shape[:2]
         else:
             # Fallback if file missing
-            print(f"Warning: Colormap file {self._colormap_file} not found. Using random noise.")
+            print(f"Warning: Colormap file {self._colormap_file} not found. "
+                  "Using random noise.")
             self._img = np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8)
             self._height, self._width = 256, 256
 
@@ -281,7 +289,7 @@ class ColorMap2d:
         assert len(X.shape) == 2
         output = np.zeros((X.shape[0], 3), dtype=np.uint8)
         
-        # Vectorized lookup would be faster, but keeping loop for safety with indices
+        # Lookup colors
         for i in range(X.shape[0]):
             x, y = X[i, :]
             xp = int((self._width - 1) * x)
@@ -324,7 +332,10 @@ def draw_text_on_vis(vis, text, scale=0.5, left=5, top=20, shadow=True):
     text_w, text_h = text_size
     
     if shadow:
-        cv2.rectangle(rgb, (left, top - text_h), (left + text_w, top + 1), text_color_bg, -1)
+        cv2.rectangle(
+            rgb, (left, top - text_h), (left + text_w, top + 1), 
+            text_color_bg, -1
+        )
     
     cv2.putText(rgb, text, (left, top), font, scale, color, 1)
     
@@ -350,7 +361,10 @@ def get_n_colors(N, sequential=False):
 # ==============================================================================
 
 class SummWriter(object):
-    def __init__(self, writer, global_step, log_freq=10, fps=8, scalar_freq=100, just_gif=False):
+    def __init__(
+        self, writer, global_step, log_freq=10, fps=8, 
+        scalar_freq=100, just_gif=False
+    ):
         self.writer = writer
         self.global_step = global_step
         self.log_freq = log_freq
@@ -375,13 +389,20 @@ class SummWriter(object):
         S = video_to_write.shape[1]
         
         if S == 1:
-            self.writer.add_image(name, video_to_write[0, 0], global_step=self.global_step)
+            self.writer.add_image(
+                name, video_to_write[0, 0], global_step=self.global_step
+            )
         else:
-            self.writer.add_video(name, video_to_write, fps=self.fps, global_step=self.global_step)
+            self.writer.add_video(
+                name, video_to_write, fps=self.fps, global_step=self.global_step
+            )
             
         return video_to_write
 
-    def summ_rgbs(self, name, ims, frame_ids=None, frame_strs=None, blacken_zeros=False, only_return=False):
+    def summ_rgbs(
+        self, name, ims, frame_ids=None, frame_strs=None, 
+        blacken_zeros=False, only_return=False
+    ):
         """Summarizes a list of images as a GIF/Tile."""
         if not self.save_this:
             return
@@ -396,7 +417,9 @@ class SummWriter(object):
         # Draw annotations
         if frame_ids is not None:
             for s in range(S):
-                vis[:, s] = draw_text_on_vis(vis[:, s], holi4d.utils.basic.strnum(frame_ids[s]), top=20)
+                vis[:, s] = draw_text_on_vis(
+                    vis[:, s], holi4d.utils.basic.strnum(frame_ids[s]), top=20
+                )
                 
         if frame_strs is not None:
             for s in range(S):
@@ -411,7 +434,10 @@ class SummWriter(object):
         else:
             return self.summ_gif(name, vis, blacken_zeros)
 
-    def summ_rgb(self, name, ims, blacken_zeros=False, frame_id=None, frame_str=None, only_return=False, halfres=False, shadow=True):
+    def summ_rgb(
+        self, name, ims, blacken_zeros=False, frame_id=None, 
+        frame_str=None, only_return=False, halfres=False, shadow=True
+    ):
         """Summarizes a single image."""
         if not self.save_this:
             return
@@ -425,7 +451,9 @@ class SummWriter(object):
             vis = F.interpolate(vis, scale_factor=0.5)
 
         if frame_id is not None:
-            vis = draw_text_on_vis(vis, holi4d.utils.basic.strnum(frame_id), top=20, shadow=shadow)
+            vis = draw_text_on_vis(
+                vis, holi4d.utils.basic.strnum(frame_id), top=20, shadow=shadow
+            )
             
         if frame_str is not None:
             vis = draw_text_on_vis(vis, frame_str, top=40, shadow=shadow)
@@ -439,14 +467,24 @@ class SummWriter(object):
             # Add fake time dimension for summ_gif
             return self.summ_gif(name, vis.unsqueeze(1), blacken_zeros)
 
-    def summ_flow(self, name, im, clip=0.0, only_return=False, frame_id=None, frame_str=None, shadow=True):
+    def summ_flow(
+        self, name, im, clip=0.0, only_return=False, 
+        frame_id=None, frame_str=None, shadow=True
+    ):
         """Summarizes optical flow."""
         if self.save_this:
             rgb_flow = flow2color(im, clip=clip)
-            return self.summ_rgb(name, rgb_flow, only_return=only_return, frame_id=frame_id, frame_str=frame_str, shadow=shadow)
+            return self.summ_rgb(
+                name, rgb_flow, only_return=only_return, 
+                frame_id=frame_id, frame_str=frame_str, shadow=shadow
+            )
         return None
 
-    def summ_oneds(self, name, ims, frame_ids=None, frame_strs=None, bev=False, fro=False, logvis=False, reduce_max=False, max_val=0.0, norm=True, only_return=False, do_colorize=False):
+    def summ_oneds(
+        self, name, ims, frame_ids=None, frame_strs=None, bev=False, fro=False, 
+        logvis=False, reduce_max=False, max_val=0.0, norm=True, 
+        only_return=False, do_colorize=False
+    ):
         """Summarizes 1D features (heatmaps) over time."""
         if not self.save_this:
             return
@@ -455,9 +493,13 @@ class SummWriter(object):
         processed_ims = []
         for im in ims:
             if bev: # B, C, H, D, W -> reduce D (dim 3)
-                processed_ims.append(torch.max(im, dim=3)[0] if reduce_max else torch.mean(im, dim=3))
+                processed_ims.append(
+                    torch.max(im, dim=3)[0] if reduce_max else torch.mean(im, dim=3)
+                )
             elif fro: # B, C, D, H, W -> reduce D (dim 2)
-                processed_ims.append(torch.max(im, dim=2)[0] if reduce_max else torch.mean(im, dim=2))
+                processed_ims.append(
+                    torch.max(im, dim=2)[0] if reduce_max else torch.mean(im, dim=2)
+                )
             else:
                 processed_ims.append(im)
         
@@ -491,7 +533,9 @@ class SummWriter(object):
         # Annotations
         if frame_ids is not None:
             for s in range(S):
-                vis[:, s] = draw_text_on_vis(vis[:, s], holi4d.utils.basic.strnum(frame_ids[s]), top=20)
+                vis[:, s] = draw_text_on_vis(
+                    vis[:, s], holi4d.utils.basic.strnum(frame_ids[s]), top=20
+                )
 
         if frame_strs is not None:
             for s in range(S):
@@ -505,7 +549,11 @@ class SummWriter(object):
         else:
             self.summ_gif(name, vis)
 
-    def summ_oned(self, name, im, bev=False, fro=False, logvis=False, max_val=0, max_along_y=False, norm=True, frame_id=None, frame_str=None, only_return=False, shadow=True):
+    def summ_oned(
+        self, name, im, bev=False, fro=False, logvis=False, max_val=0, 
+        max_along_y=False, norm=True, frame_id=None, frame_str=None, 
+        only_return=False, shadow=True
+    ):
         """Summarizes a single 1D feature map."""
         if not self.save_this:
             return
@@ -531,9 +579,15 @@ class SummWriter(object):
         if vis.shape[-1] > self.maxwidth:
             vis = vis[..., :self.maxwidth]
             
-        return self.summ_rgb(name, vis, blacken_zeros=False, frame_id=frame_id, frame_str=frame_str, only_return=only_return, shadow=shadow)
+        return self.summ_rgb(
+            name, vis, blacken_zeros=False, frame_id=frame_id, 
+            frame_str=frame_str, only_return=only_return, shadow=shadow
+        )
 
-    def summ_feats(self, name, feats, valids=None, pca=True, fro=False, only_return=False, frame_ids=None, frame_strs=None):
+    def summ_feats(
+        self, name, feats, valids=None, pca=True, fro=False, 
+        only_return=False, frame_ids=None, frame_strs=None
+    ):
         """Summarizes high-dimensional features using PCA or magnitude."""
         if not self.save_this:
             return
@@ -549,7 +603,9 @@ class SummWriter(object):
                 feats = torch.mean(feats, dim=reduce_dim)
             else: 
                 valids = valids.repeat(1, 1, feats.size()[2], 1, 1, 1)
-                feats = holi4d.utils.basic.reduce_masked_mean(feats, valids, dim=reduce_dim)
+                feats = holi4d.utils.basic.reduce_masked_mean(
+                    feats, valids, dim=reduce_dim
+                )
 
         B, S, C, H, W = feats.size()
 
@@ -557,19 +613,24 @@ class SummWriter(object):
             # Magnitude
             feats_mag = torch.mean(torch.abs(feats), dim=2, keepdims=True)
             feats_list = torch.unbind(feats_mag, dim=1)
-            return self.summ_oneds(name=name, ims=feats_list, norm=True, only_return=only_return, frame_ids=frame_ids, frame_strs=frame_strs)
+            return self.summ_oneds(
+                name=name, ims=feats_list, norm=True, only_return=only_return, 
+                frame_ids=frame_ids, frame_strs=frame_strs
+            )
         else:
             # PCA
             feats_packed = holi4d.utils.basic.pack_seqdim(feats, B)
             if valids is None:
                 feats_pca_packed = get_feat_pca(feats_packed)
             else:
-                # Note: get_feat_pca logic might need adjustment to handle valids if strictly required
-                # For now, passing just feats as per original logic flow
+                # Note: get_feat_pca logic might need adjustment to handle valids
                 feats_pca_packed = get_feat_pca(feats_packed)
 
             feats_pca = holi4d.utils.basic.unpack_seqdim(feats_pca_packed, B)
-            return self.summ_rgbs(name=name, ims=torch.unbind(feats_pca, dim=1), only_return=only_return, frame_ids=frame_ids, frame_strs=frame_strs)
+            return self.summ_rgbs(
+                name=name, ims=torch.unbind(feats_pca, dim=1), 
+                only_return=only_return, frame_ids=frame_ids, frame_strs=frame_strs
+            )
 
     def summ_scalar(self, name, value):
         """Logs a scalar value."""
@@ -613,18 +674,22 @@ class SummWriter(object):
 
         return rgbs_color, trajs, valids, visibs, N
 
-    def summ_traj2ds_on_rgbs(self, name, trajs, rgbs, visibs=None, valids=None, frame_ids=None, frame_strs=None, only_return=False, show_dots=True, cmap='coolwarm', vals=None, linewidth=1, max_show=1024):
+    def summ_traj2ds_on_rgbs(
+        self, name, trajs, rgbs, visibs=None, valids=None, frame_ids=None, 
+        frame_strs=None, only_return=False, show_dots=True, cmap='coolwarm', 
+        vals=None, linewidth=1, max_show=1024
+    ):
         """Draws trajectories on a sequence of RGB images."""
         if not self.save_this: return
 
         B, S, C, H, W = rgbs.shape
-        rgbs_color, trajs, valids, visibs, N = self._prepare_traj_data(trajs, rgbs, valids, visibs, max_show, W)
+        rgbs_color, trajs, valids, visibs, N = self._prepare_traj_data(
+            trajs, rgbs, valids, visibs, max_show, W
+        )
         
         if vals is not None:
             vals = vals[0] # N (assuming B=1 for vals too)
-            if vals.shape[0] > N: # if we subsampled N
-                 # Note: Logic here is tricky if we subsampled randomly above. 
-                 # Ideally _prepare_traj_data should handle vals too.
+            if vals.shape[0] > N: 
                  pass 
 
         trajs_np = trajs.long().detach().cpu().numpy()
@@ -632,7 +697,10 @@ class SummWriter(object):
         visibs_np = visibs.round().detach().cpu().numpy()
 
         for i in range(N):
-            cmap_ = 'spring' if (cmap == 'onediff' and i == 0) else ('winter' if cmap == 'onediff' else cmap)
+            if cmap == 'onediff':
+                cmap_ = 'spring' if i == 0 else 'winter'
+            else:
+                cmap_ = cmap
             
             traj = trajs_np[:, i]
             valid = valids_np[:, i]
@@ -641,10 +709,16 @@ class SummWriter(object):
             # Draw lines up to current frame
             for t in range(S):
                 if valid[t]:
-                    rgbs_color[t] = self.draw_traj_on_image_py(rgbs_color[t], traj[:t+1], S=S, show_dots=show_dots, cmap=cmap_, linewidth=linewidth)
+                    rgbs_color[t] = self.draw_traj_on_image_py(
+                        rgbs_color[t], traj[:t+1], S=S, show_dots=show_dots, 
+                        cmap=cmap_, linewidth=linewidth
+                    )
 
             # Draw current point
-            rgbs_color = self.draw_circ_on_images_py(rgbs_color, traj, vis, S=S, show_dots=show_dots, cmap=cmap_, linewidth=linewidth)
+            rgbs_color = self.draw_circ_on_images_py(
+                rgbs_color, traj, vis, S=S, show_dots=show_dots, 
+                cmap=cmap_, linewidth=linewidth
+            )
 
         # Convert back to tensor
         out_rgbs = []
@@ -652,9 +726,15 @@ class SummWriter(object):
             rgb_t = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0)
             out_rgbs.append(preprocess_color(rgb_t))
 
-        return self.summ_rgbs(name, out_rgbs, only_return=only_return, frame_ids=frame_ids, frame_strs=frame_strs)
+        return self.summ_rgbs(
+            name, out_rgbs, only_return=only_return, 
+            frame_ids=frame_ids, frame_strs=frame_strs
+        )
 
-    def draw_traj_on_image_py(self, rgb, traj, S=50, linewidth=1, show_dots=False, show_lines=True, cmap='coolwarm', val=None, maxdist=None):
+    def draw_traj_on_image_py(
+        self, rgb, traj, S=50, linewidth=1, show_dots=False, 
+        show_lines=True, cmap='coolwarm', val=None, maxdist=None
+    ):
         """Draws a single trajectory on a single image (numpy)."""
         rgb = rgb.copy() # Ensure we don't modify original if shared
         S1, D = traj.shape
@@ -673,17 +753,25 @@ class SummWriter(object):
             color = np.array(color_map(c_val)[:3]) * 255
 
             if show_lines and s < (S1 - 1):
-                cv2.line(rgb,
-                         (int(traj[s, 0]), int(traj[s, 1])),
-                         (int(traj[s+1, 0]), int(traj[s+1, 1])),
-                         color,
-                         linewidth,
-                         cv2.LINE_AA)
+                cv2.line(
+                    rgb,
+                    (int(traj[s, 0]), int(traj[s, 1])),
+                    (int(traj[s+1, 0]), int(traj[s+1, 1])),
+                    color,
+                    linewidth,
+                    cv2.LINE_AA
+                )
             if show_dots:
-                cv2.circle(rgb, (int(traj[s, 0]), int(traj[s, 1])), linewidth, color, -1)
+                cv2.circle(
+                    rgb, (int(traj[s, 0]), int(traj[s, 1])), 
+                    linewidth, color, -1
+                )
         return rgb
 
-    def draw_circ_on_images_py(self, rgbs, traj, vis, S=50, linewidth=1, show_dots=False, cmap=None, maxdist=None):
+    def draw_circ_on_images_py(
+        self, rgbs, traj, vis, S=50, linewidth=1, 
+        show_dots=False, cmap=None, maxdist=None
+    ):
         """Draws the current position circle on a list of images."""
         # rgbs: list of HWC numpy arrays
         H, W, _ = rgbs[0].shape
@@ -721,35 +809,50 @@ class SummWriter(object):
                 
         return rgbs
 
-    def summ_pts_on_rgb(self, name, trajs, rgb, visibs=None, valids=None, frame_id=None, frame_str=None, only_return=False, show_dots=True, colors=None, cmap='coolwarm', linewidth=1, max_show=1024, already_sorted=False):
-        """Draws points on a single RGB image."""
-        if not self.save_this: return
+    def summ_pts_on_rgb(
+        self, name, trajs, rgb, visibs=None, valids=None, frame_id=None, 
+        frame_str=None, only_return=False, show_dots=True, colors=None, 
+        cmap='coolwarm', linewidth=1, max_show=1024, already_sorted=False
+    ):
+        """
+        Draws points or trajectories on a single RGB image for visualization.
+        
+        Args:
+            trajs: (B, S, N, 2) tensor of point coordinates.
+            visibs: (B, S, N) visibility flags (visible vs occluded).
+            valids: (B, S, N) validity flags (existing vs non-existing points).
+            linewidth: Thickness of the points/circles.
+            max_show: Maximum number of points to draw to avoid clutter.
+        """
+        if not self.save_this: 
+            return
 
         B, C, H, W = rgb.shape
+        # Take the first item in the batch
         rgb = rgb[0]
         trajs = trajs[0] # S, N, 2
         
+        # Default valids/visibs to 1s if not provided
         valids = valids[0] if valids is not None else torch.ones_like(trajs[:, :, 0])
         visibs = visibs[0] if visibs is not None else torch.ones_like(trajs[:, :, 0])
 
+        # Clamp trajectories slightly outside image boundaries for smooth drawing
         trajs = trajs.clamp(-16, W + 16)
         N = trajs.shape[1]
 
-        # Subsample
+        # 1. Memory Management: Subsample points if they exceed max_show
         if N > max_show:
             inds = np.random.choice(N, max_show, replace=False)
-            trajs = trajs[:, inds]
-            valids = valids[:, inds]
-            visibs = visibs[:, inds]
+            trajs, valids, visibs = trajs[:, inds], valids[:, inds], visibs[:, inds]
             N = max_show
 
-        # Sort by Y for depth ordering effect
+        # 2. Depth Ordering: Sort by Y-coordinate to simulate 3D occlusion
         if not already_sorted:
+            # Sort points based on their average vertical position
             inds = torch.argsort(torch.mean(trajs[:, :, 1], dim=0))
-            trajs = trajs[:, inds]
-            valids = valids[:, inds]
-            visibs = visibs[:, inds]
+            trajs, valids, visibs = trajs[:, inds], valids[:, inds], visibs[:, inds]
 
+        # 3. Preparation: Convert tensors to CPU numpy arrays
         rgb_np = back2color(rgb).detach().cpu().numpy()
         rgb_np = np.transpose(rgb_np, [1, 2, 0])
         rgb_np = np.ascontiguousarray(rgb_np)
@@ -764,13 +867,15 @@ class SummWriter(object):
         except:
             color_map = cm.get_cmap(cmap)
 
+        # 4. Drawing Loop
         for i in range(N):
-            cmap_ = 'spring' if (cmap == 'onediff' and i == 0) else ('winter' if cmap == 'onediff' else cmap)
+            # Special case for 'onediff' colormap to highlight the first point
+            cmap_ = 'spring' if (cmap == 'onediff' and i == 0) else \
+                    ('winter' if cmap == 'onediff' else cmap)
             
-            traj = trajs_np[:, i]
-            valid = valids_np[:, i]
-            visib = visibs_np[:, i]
+            traj, valid, visib = trajs_np[:, i], valids_np[:, i], visibs_np[:, i]
 
+            # Assign colors based on index or provided list
             if colors is None:
                 ii = i / (1e-4 + N - 1.0)
                 color = np.array(color_map(ii)[:3]) * 255
@@ -779,12 +884,23 @@ class SummWriter(object):
             
             color = (int(color[0]), int(color[1]), int(color[2]))
 
+            # Draw circles for each timestep in the trajectory
             for s in range(S):
                 if valid[s]:
+                    # Visual Encoding: 
+                    # Filled circle (-1) = Visible, Outlined circle (2) = Occluded
                     thickness = -1 if visib[s] else 2
-                    cv2.circle(rgb_np, (int(traj[s, 0]), int(traj[s, 1])), linewidth, color, thickness)
+                    cv2.circle(
+                        rgb_np, 
+                        (int(traj[s, 0]), int(traj[s, 1])), 
+                        linewidth, color, thickness
+                    )
 
+        # 5. Output: Preprocess back to tensor format
         rgb_out = torch.from_numpy(rgb_np).permute(2, 0, 1).unsqueeze(0)
         rgb_out = preprocess_color(rgb_out)
         
-        return self.summ_rgb(name, rgb_out, only_return=only_return, frame_id=frame_id, frame_str=frame_str)
+        return self.summ_rgb(
+            name, rgb_out, only_return=only_return, 
+            frame_id=frame_id, frame_str=frame_str
+        )

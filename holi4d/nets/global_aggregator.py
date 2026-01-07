@@ -35,7 +35,7 @@ class Global_Aggregator(nn.Module):
         ffn_bias (bool): Whether to include bias in MLP layers.
         patch_embed (str): Type of patch embed. e.g., "conv" or "dinov2_vitl14_reg".
         aa_order (list[str]): The order of alternating attention, e.g. ["frame", "global"].
-        aa_block_size (int): How many blocks to group under each attention type before switching. If not necessary, set to 1.
+        aa_block_size (int): How many blocks to group under each attention type before switching.
         qk_norm (bool): Whether to apply QK normalization.
         rope_freq (int): Base frequency for rotary embedding. -1 to disable.
         init_values (float): Init scale for layer scale.

@@ -514,26 +514,64 @@ def load_scene_gt(
 def main():
     parser = argparse.ArgumentParser(description="Holi4D Inference and Evaluation Script")
 
-    # --- Model Configuration ---
-    parser.add_argument("--ckpt_init", type=str, default="./checkpoints/holi4d.pth", help="Path to model checkpoint")
-    parser.add_argument("--config_path", type=str, default="./holi4d/config/eval/v1.json", help="Path to model config JSON")
-    parser.add_argument("--output", "-o", dest="output_path", type=str, default='./output_sintel/23', help="Output folder path")
-    parser.add_argument("--device", dest="device_name", type=str, default='cuda', help="Device name")
-    parser.add_argument("--fp16", action='store_true', help="Use fp16 precision")
+    # --- Model & Environment Configuration ---
+    parser.add_argument(
+        "--ckpt_init", type=str, default="./checkpoints/holi4d.pth", 
+        help="Path to pretrained model checkpoint"
+    )
+    parser.add_argument(
+        "--config_path", type=str, default="./holi4d/config/eval/v1.json", 
+        help="Path to model configuration JSON"
+    )
+    parser.add_argument(
+        "--output", "-o", dest="output_path", type=str, default='./output_sintel/23', 
+        help="Directory to save predictions and visualizations"
+    )
+    parser.add_argument(
+        "--device", dest="device_name", type=str, default='cuda', 
+        help="Computation device (e.g., 'cuda', 'cpu', 'mps')"
+    )
+    parser.add_argument(
+        "--fp16", action='store_true', 
+        help="Enable half-precision (float16) for faster inference"
+    )
     
-    # --- Data Configuration ---
-    parser.add_argument("--resize-to", type=int, default=512, help="Resize short edge to this size")
-    parser.add_argument("--frames", type=str, default='0-150', help="Frame range 'start-end'")
-    parser.add_argument("--gt-dataset-type", type=str, default='Sintel', 
-                        choices=['Tum', 'Sintel', 'Scannet', 'Monkaa', 'Kubric-3D', 'KITTI', 'GMUKitchens'], 
-                        help="Dataset type")
+    # --- Data & Input Configuration ---
+    parser.add_argument(
+        "--resize-to", type=int, default=512, 
+        help="Resolution to which the image's short edge is resized"
+    )
+    parser.add_argument(
+        "--frames", type=str, default='0-150', 
+        help="Target frame range in 'start-end' format"
+    )
+    parser.add_argument(
+        "--gt-dataset-type", type=str, default='Sintel', 
+        choices=['Tum', 'Sintel', 'Scannet', 'Monkaa', 'Kubric-3D', 'KITTI', 'GMUKitchens'], 
+        help="Ground truth dataset format for evaluation"
+    )
     
-    # --- Inference Parameters ---
-    parser.add_argument("--fov_x", dest="fov_x_", type=float, default=None, help="Horizontal FOV (deg). None = Auto")
-    parser.add_argument("--resolution_level", type=int, default=0, help="Resolution level [0-9]")
-    parser.add_argument("--num_tokens", type=int, default=None, help="Explicit token count (overrides resolution_level)")
-    parser.add_argument("--max-depth", type=float, default=70.0, help="Max depth for evaluation")
-    parser.add_argument("--chunk_size", type=int, default=130, help="Process in chunks to avoid OOM")
+    # --- Inference & Geometric Hyperparameters ---
+    parser.add_argument(
+        "--fov_x", dest="fov_x_", type=float, default=None, 
+        help="Horizontal Field of View in degrees. If None, the model recovers it."
+    )
+    parser.add_argument(
+        "--resolution_level", type=int, default=0, 
+        help="Detail level [0-9], where higher is more detailed but slower"
+    )
+    parser.add_argument(
+        "--num_tokens", type=int, default=None, 
+        help="Explicit Transformer token count (overrides resolution_level)"
+    )
+    parser.add_argument(
+        "--max-depth", type=float, default=70.0, 
+        help="Maximum depth threshold (meters) for evaluation metrics"
+    )
+    parser.add_argument(
+        "--chunk_size", type=int, default=130, 
+        help="Temporal chunk size for processing long videos to manage VRAM"
+    )
     
     args = parser.parse_args()
 

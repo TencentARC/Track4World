@@ -346,9 +346,16 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
                     offset = first_positive_ind - pre_first_positive_ind
                     # Shift features/maps to align with the new start time
                     keys_to_shift = ['fmaps', 'ctxfeats', 'fmaps3d_detail', 'pms', 'points', 'masks']
+                    # Iterate through specific feature keys to maintain temporal alignment
                     for key in keys_to_shift:
                         if key in eval_dict:
-                            eval_dict[key] = eval_dict[key][:, offset:] if eval_dict[key].ndim > 1 else eval_dict[key][offset:]
+                            # If the feature has a temporal dimension (ndim > 1), 
+                            # slice starting from the offset
+                            if eval_dict[key].ndim > 1:
+                                eval_dict[key] = eval_dict[key][:, offset:]
+                            else:
+                                # For 1D tensors, slice directly along the first axis
+                                eval_dict[key] = eval_dict[key][offset:]
 
                 # Run Model Inference
                 if first_positive_ind < T - 1:
@@ -359,7 +366,7 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
                         is_training=False, 
                         tracking3d=True, 
                         force_projection=True, 
-                        eval_dict=None # Passing None resets for new chunk? Logic seems to rely on external eval_dict update?
+                        eval_dict=None 
                         # Note: In original code, eval_dict was passed as None here. 
                         # If state persistence is needed, check model implementation.
                     )

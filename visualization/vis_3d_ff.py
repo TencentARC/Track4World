@@ -139,20 +139,43 @@ def main(
 
     # ===================== GUI Controls =====================
     with server.gui.add_folder("Playback Controls"):
-        # Playback
+        # --- Playback Logic ---
+        # Toggles the animation state (on/off)
         gui_playing = server.gui.add_checkbox("Playing", True)
-        gui_framerate = server.gui.add_slider("FPS", min=1, max=60, step=1, initial_value=24)
-        gui_timestep = server.gui.add_slider("Timestep", min=0, max=num_frames - 1, step=1, initial_value=0)
         
-        # Appearance
-        gui_point_size = server.gui.add_slider("Point size", min=0.001, max=10, step=0.001, initial_value=0.01)
-        gui_line_width = server.gui.add_slider("Line width", min=0.1, max=5.0, step=0.1, initial_value=0.5)
-        gui_max_traj_length = server.gui.add_slider("Trail Length (Frames)", min=1, max=50, step=1, initial_value=5)
+        # Controls the speed of the temporal update
+        gui_framerate = server.gui.add_slider(
+            "FPS", min=1, max=60, step=1, initial_value=24
+        )
+        
+        # Manual scrub control for the current video/sequence frame
+        gui_timestep = server.gui.add_slider(
+            "Timestep", min=0, max=num_frames - 1, step=1, initial_value=0
+        )
+        
+        # --- Appearance & Aesthetics ---
+        # Controls the radius of individual 3D points
+        gui_point_size = server.gui.add_slider(
+            "Point size", min=0.001, max=10, step=0.001, initial_value=0.01
+        )
+        
+        # Controls the thickness of tracking lines/trajectories
+        gui_line_width = server.gui.add_slider(
+            "Line width", min=0.1, max=5.0, step=0.1, initial_value=0.5
+        )
+        
+        # Sets how many historical frames of motion are visible behind a point
+        gui_max_traj_length = server.gui.add_slider(
+            "Trail Length (Frames)", min=1, max=50, step=1, initial_value=5
+        )
 
-        # Visualization Mode
-        gui_vis_mode = server.gui.add_button_group("Vis Mode", ("PointCloud", "Tracking", "Both"))
+        # --- Visualization Mode ---
+        # Switch between viewing static geometry, motion paths, or both
+        gui_vis_mode = server.gui.add_button_group(
+            "Vis Mode", ("PointCloud", "Tracking", "Both")
+        )
         gui_vis_mode.value = "Both"
-
+        
     # ===================== Trajectory Setup =====================
     # Line node for drawing trails
     line_node = server.scene.add_line_segments(

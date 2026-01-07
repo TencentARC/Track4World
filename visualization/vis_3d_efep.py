@@ -28,7 +28,10 @@ MAX_DISPLACEMENT = 1.0
 # Helper Functions
 # ==============================================================================
 
-def remove_radius_outlier_gpu(points: np.ndarray, nb_points: int = 40, radius: float = 0.01) -> Tuple[np.ndarray, np.ndarray]:
+def remove_radius_outlier_gpu(points: np.ndarray, 
+    nb_points: int = 40, 
+    radius: float = 0.01
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Removes outliers using GPU-accelerated Faiss (K-Nearest Neighbors).
     
@@ -61,7 +64,10 @@ def remove_radius_outlier_gpu(points: np.ndarray, nb_points: int = 40, radius: f
     return points[mask].cpu().numpy(), np.nonzero(mask.cpu().numpy())[0]
 
 
-def remove_radius_outlier_open3d(points: np.ndarray, nb_points: int = 20, radius: float = 0.001) -> Tuple[np.ndarray, np.ndarray]:
+def remove_radius_outlier_open3d(points: np.ndarray, 
+    nb_points: int = 20, 
+    radius: float = 0.001
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Removes outliers using Open3D (CPU implementation).
     
@@ -86,7 +92,10 @@ def remove_radius_outlier_open3d(points: np.ndarray, nb_points: int = 20, radius
     
     return points_filtered, np.array(ind)
 
-def remove_std_outlier_open3d(points: np.ndarray, nb_neighbors: int = 30, std_ratio: float = 2.0) -> Tuple[np.ndarray, np.ndarray]:
+def remove_std_outlier_open3d(points: np.ndarray, 
+    nb_neighbors: int = 30, 
+    std_ratio: float = 2.0
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Removes outliers using Open3D (CPU implementation).
     
@@ -150,11 +159,6 @@ def main(
         raise FileNotFoundError(f"Trajectory file not found: {traj_path}")
         
     trajectory_all_raw = np.load(str(traj_path))
-
-    c2w_path = ply_dir / 'c2w.npy'
-    if not c2w_path.exists():
-        raise FileNotFoundError(f"Camera pose file not found: {c2w_path}")
-    c2w = np.load(str(c2w_path))
 
     initial_colors = None
     point_nodes: List[viser.PointCloudHandle] = []
@@ -247,22 +251,51 @@ def main(
 
     # --- GUI Controls ---
     with server.gui.add_folder("Playback"):
-        # Appearance
-        gui_point_size = server.gui.add_slider("Point size", min=0.00001, max=2, step=1e-3, initial_value=0.008)
-        gui_line_width = server.gui.add_slider("Line width", min=0.01, max=10, step=0.01, initial_value=0.3)
+        # --- Appearance ---
+        # Fine-grained control for point cloud density
+        gui_point_size = server.gui.add_slider(
+            "Point size", min=0.00001, max=2, step=1e-3, initial_value=0.008
+        )
+        # Thickness for rendered trajectory lines
+        gui_line_width = server.gui.add_slider(
+            "Line width", min=0.01, max=10, step=0.01, initial_value=0.3
+        )
         
-        # Playback
-        gui_timestep = server.gui.add_slider("Timestep", min=0, max=num_frames - 1, step=1, initial_value=0, disabled=True)
+        # --- Playback Logic ---
+        # The slider is disabled by default to prevent conflicts with the 'Playing' loop
+        gui_timestep = server.gui.add_slider(
+            "Timestep", min=0, max=num_frames - 1, step=1, initial_value=0, disabled=True
+        )
         gui_playing = server.gui.add_checkbox("Playing", False)
-        gui_framerate = server.gui.add_slider("FPS", min=1, max=60, step=0.1, initial_value=24)
+        gui_framerate = server.gui.add_slider(
+            "FPS", min=1, max=60, step=0.1, initial_value=24
+        )
         
-        # Trajectory Settings
+        # --- Trajectory & Optimization Settings ---
         gui_show_trajectories = server.gui.add_checkbox("Show Trajectories", True)
-        gui_max_traj_length = server.gui.add_slider("Max trajectory length", min=1, max=200, step=1, initial_value=5)
-        gui_downsample = server.gui.add_slider("Downsample rate", min=1, max=500, step=1, initial_value=DEFAULT_POINT_DOWNSAMPLE_RATE)
-        gui_max_displacement = server.gui.add_slider("Displacement value", min=0.01, max=100, step=0.01, initial_value=MAX_DISPLACEMENT)
-        # Visualization Mode
-        gui_vis_mode = server.gui.add_button_group("Visualization Mode", ("PointCloud", "Tracking", "Both"))
+        
+        # How many past/future frames to link together in a line
+        gui_max_traj_length = server.gui.add_slider(
+            "Max trajectory length", min=1, max=200, step=1, initial_value=5
+        )
+        
+        # Optimization: Renders every N-th point to maintain high FPS
+        gui_downsample = server.gui.add_slider(
+            "Downsample rate", min=1, max=500, step=1, 
+            initial_value=DEFAULT_POINT_DOWNSAMPLE_RATE
+        )
+        
+        # Threshold to filter out stationary points or extreme outliers
+        gui_max_displacement = server.gui.add_slider(
+            "Displacement value", min=0.01, max=100, step=0.01, 
+            initial_value=MAX_DISPLACEMENT
+        )
+
+        # --- Visualization Mode ---
+        # Switch between raw points, motion paths, or a hybrid view
+        gui_vis_mode = server.gui.add_button_group(
+            "Visualization Mode", ("PointCloud", "Tracking", "Both")
+        )
         gui_vis_mode.value = "Both"
 
     # --- Trajectory Line Node Initialization ---
@@ -327,19 +360,20 @@ def main(
 
         # Get positions for current and next frame (scaled)
         # Note: t_curr is used as index for 'prev' because we draw line from t to t+1
-        prev_positions = 100 * trajectories_3d[t_curr][visibility_mask[t_curr]]
+        valid_mask = visibility_mask[t_curr - 1] & visibility_mask[t_curr]
+        prev_positions = 100 * trajectories_3d[t_curr - 1][valid_mask] 
         
         # Ensure we don't go out of bounds
-        if t_curr + 1 >= trajectories_3d.shape[0]:
+        if t_curr >= trajectories_3d.shape[0]:
             return
             
-        curr_positions = 100 * trajectories_3d[t_curr+1][visibility_mask[t_curr]]
+        curr_positions = 100 * trajectories_3d[t_curr][valid_mask]
         
         if prev_positions.shape[0] == 0:
             return
 
         # Prepare colors
-        new_colors = np.repeat(initial_colors[visibility_mask[t_curr]][:, None, :], 2, axis=1)
+        new_colors = np.repeat(initial_colors[valid_mask][:, None, :], 2, axis=1)
 
         # Filter out large jumps (teleportation artifacts)
         displacement = np.linalg.norm(curr_positions - prev_positions, axis=1)

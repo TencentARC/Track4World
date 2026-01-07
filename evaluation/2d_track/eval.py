@@ -173,7 +173,9 @@ def forward_batch(batch, model, args, sw):
         for first_positive_ind in torch.unique(first_positive_inds):
             
             # 1. Identify points starting at this specific frame
-            chunk_pt_idxs = torch.nonzero(first_positive_inds[0] == first_positive_ind, as_tuple=False)[:, 0]  # Indices of points
+            mask = (first_positive_inds[0] == first_positive_ind)
+
+            chunk_pt_idxs = torch.nonzero(mask, as_tuple=False)[:, 0]
             
             # Extract ground truth starting positions for these points
             # chunk_pts: [B, K, 2] where K is number of points in this chunk
@@ -247,7 +249,8 @@ def forward_batch(batch, model, args, sw):
 
     # 5. Compute Metrics (TAP-Vid style)
     vis_thr = 0.6
-    query_points_all = torch.cat(query_points_all, dim=1)[..., [0, 2, 1]] # Reorder to [Frame, Y, X] or similar expected format
+    # Reorder to [Frame, Y, X] or similar expected format
+    query_points_all = torch.cat(query_points_all, dim=1)[..., [0, 2, 1]]
     
     gt_occluded = (vis_g < .5).bool().transpose(1, 2)
     gt_tracks = trajs_g.transpose(1, 2)

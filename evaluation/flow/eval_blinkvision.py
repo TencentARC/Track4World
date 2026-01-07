@@ -322,7 +322,7 @@ def test_flow(model: torch.nn.Module, args: argparse.Namespace):
         
         # Extract predictions
         pred_2d_motion = output[1]['flow_2d'][:, 0].permute(0, 2, 3, 1) # (B, H, W, 2)
-        pred_points = output[0]['points'][:, 0]                         # (B, 3, H, W) -> (B, H, W, 3) implicitly? Check shape.
+        pred_points = output[0]['points'][:, 0]  
         pred_flow3d = output[1]['flow_3d'][:, 0]
         pred_3dmotion = output[1]['flow_3d'][:, 0] - output[0]['points'][:, 0]
 

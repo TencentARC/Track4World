@@ -509,26 +509,64 @@ def load_scene_gt(
 def main():
     parser = argparse.ArgumentParser(description="Holi4D Inference and Evaluation Script")
 
-    # --- Model Configuration ---
-    parser.add_argument("--ckpt_init", type=str, default="./checkpoints/holi4d.pth", help="Path to model checkpoint")
-    parser.add_argument("--config_path", type=str, default="./holi4d/config/eval/v1.json", help="Path to model config JSON")
-    parser.add_argument("--output", "-o", dest="output_path", type=str, default='./output_sintel/23', help="Output folder path")
-    parser.add_argument("--device", dest="device_name", type=str, default='cuda', help="Device name")
-    parser.add_argument("--fp16", action='store_true', help="Use fp16 precision")
+    # --- Model Weights & Environment ---
+    parser.add_argument(
+        "--ckpt_init", type=str, default="./checkpoints/holi4d.pth", 
+        help="Path to the pretrained model checkpoint file"
+    )
+    parser.add_argument(
+        "--config_path", type=str, default="./holi4d/config/eval/v1.json", 
+        help="Path to the model architecture configuration JSON"
+    )
+    parser.add_argument(
+        "--output", "-o", dest="output_path", type=str, default='./output_sintel/23', 
+        help="Directory where output points and visualizations will be saved"
+    )
+    parser.add_argument(
+        "--device", dest="device_name", type=str, default='cuda', 
+        help="Computation device to use (e.g., 'cuda', 'cpu', 'mps')"
+    )
+    parser.add_argument(
+        "--fp16", action='store_true', 
+        help="Enable half-precision (float16) for faster inference and lower VRAM usage"
+    )
     
-    # --- Data Configuration ---
-    parser.add_argument("--resize-to", type=int, default=512, help="Resize short edge to this size")
-    parser.add_argument("--frames", type=str, default='0-150', help="Frame range 'start-end'")
-    parser.add_argument("--gt-dataset-type", type=str, default='Sintel', 
-                        choices=['Bonn', 'Sintel', 'Scannet', 'Monkaa', 'Kubric-3D', 'KITTI', 'GMUKitchens'], 
-                        help="Dataset type")
+    # --- Input Data Configuration ---
+    parser.add_argument(
+        "--resize-to", type=int, default=512, 
+        help="Rescales the short edge of input images to this pixel size"
+    )
+    parser.add_argument(
+        "--frames", type=str, default='0-150', 
+        help="The range of video frames to process, formatted as 'start_index-end_index'"
+    )
+    parser.add_argument(
+        "--gt-dataset-type", type=str, default='Sintel', 
+        choices=['Bonn', 'Sintel', 'Scannet', 'Monkaa', 'Kubric-3D', 'KITTI', 'GMUKitchens'], 
+        help="Specifies the dataset format for ground truth comparison"
+    )
     
-    # --- Inference Parameters ---
-    parser.add_argument("--fov_x", dest="fov_x_", type=float, default=None, help="Horizontal FOV (deg). None = Auto")
-    parser.add_argument("--resolution_level", type=int, default=0, help="Resolution level [0-9]")
-    parser.add_argument("--num_tokens", type=int, default=None, help="Explicit token count (overrides resolution_level)")
-    parser.add_argument("--max-depth", type=float, default=70.0, help="Max depth for evaluation")
-    parser.add_argument("--chunk_size", type=int, default=130, help="Process in chunks to avoid OOM")
+    # --- Geometric & Performance Parameters ---
+    parser.add_argument(
+        "--fov_x", dest="fov_x_", type=float, default=None, 
+        help="Horizontal Field of View in degrees. If None, the model estimates it automatically."
+    )
+    parser.add_argument(
+        "--resolution_level", type=int, default=0, 
+        help="Internal resolution setting [0-9]; higher values increase detail but require more memory"
+    )
+    parser.add_argument(
+        "--num_tokens", type=int, default=None, 
+        help="Explicit Transformer token count; overrides the resolution_level setting if provided"
+    )
+    parser.add_argument(
+        "--max-depth", type=float, default=70.0, 
+        help="The distance threshold (in meters) beyond which depth values are ignored during evaluation"
+    )
+    parser.add_argument(
+        "--chunk_size", type=int, default=130, 
+        help="Temporal window size for processing long videos to prevent Out-Of-Memory (OOM) errors"
+    )
     
     args = parser.parse_args()
 

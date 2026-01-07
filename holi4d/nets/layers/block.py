@@ -20,11 +20,18 @@ from .drop_path import DropPath
 from .layer_scale import LayerScale
 from .mlp import Mlp
 
-
+# Flag indicating whether xFormers (memory-efficient attention) is available
 XFORMERS_AVAILABLE = False
 
 
 class Block(nn.Module):
+    """
+    Standard Transformer block consisting of:
+      - LayerNorm + Multi-Head Self-Attention
+      - LayerNorm + Feed-Forward Network (MLP)
+      - Optional LayerScale and Stochastic Depth (DropPath)
+    """
+
     def __init__(
         self,
         dim: int,
@@ -42,13 +49,15 @@ class Block(nn.Module):
         attn_class: Callable[..., nn.Module] = Attention,
         ffn_layer: Callable[..., nn.Module] = Mlp,
         qk_norm: bool = False,
-        fused_attn: bool = True,  # use F.scaled_dot_product_attention or not
-        rope=None,
+        fused_attn: bool = True,  # whether to use scaled_dot_product_attention
+        rope=None,                # rotary positional embedding (optional)
     ) -> None:
         super().__init__()
 
+        # Pre-norm before attention
         self.norm1 = norm_layer(dim)
 
+        # Multi-head self-attention module
         self.attn = attn_class(
             dim,
             num_heads=num_heads,
@@ -61,10 +70,14 @@ class Block(nn.Module):
             rope=rope,
         )
 
+        # LayerScale and stochastic depth for attention branch
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
+        # Pre-norm before FFN
         self.norm2 = norm_layer(dim)
+
+        # Feed-forward network
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = ffn_layer(
             in_features=dim,
@@ -73,12 +86,24 @@ class Block(nn.Module):
             drop=drop,
             bias=ffn_bias,
         )
+
+        # LayerScale and stochastic depth for FFN branch
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
+        # Drop-path ratio used for sample-wise stochastic depth
         self.sample_drop_ratio = drop_path
 
     def forward(self, x: Tensor, pos=None) -> Tensor:
+        """
+        Args:
+            x: Input tensor of shape (B, N, C)
+            pos: Optional positional encoding (e.g., RoPE)
+
+        Returns:
+            Output tensor with the same shape as x
+        """
+
         def attn_residual_func(x: Tensor, pos=None) -> Tensor:
             return self.ls1(self.attn(self.norm1(x), pos=pos))
 
@@ -113,6 +138,13 @@ def drop_add_residual_stochastic_depth(
     sample_drop_ratio: float = 0.0,
     pos=None,
 ) -> Tensor:
+    """
+    Applies stochastic depth by computing residuals only on a subset
+    of batch samples and scaling them accordingly.
+
+    This reduces computation while preserving expectation.
+    """
+
     # 1) extract subset using permutation
     b, n, d = x.shape
     sample_subset_size = max(int(b * (1 - sample_drop_ratio)), 1)
@@ -208,6 +240,11 @@ def drop_add_residual_stochastic_depth_list(
 
 
 class NestedTensorBlock(Block):
+    """
+    Transformer block that supports nested tensors (variable-length sequences)
+    using xFormers memory-efficient attention.
+    """
+
     def forward_nested(self, x_list: List[Tensor]) -> List[Tensor]:
         """
         x_list contains a list of tensors to nest together and run

@@ -4,8 +4,8 @@
 # Unified Path Settings
 # ============================================================
 
-VIDEO="/group/40075/public_datasets/GeometryCrafter/datasets/DAVIS/horsejump-high.mp4"
-OUTPUT_DIR="results/horsejump-high"
+VIDEO="/group/40075/jiahaolu/cleaned_code/Holi4D/demo_data/snowboard.mp4"
+OUTPUT_DIR="results/snowboard"
 SAM2_CKPT="/group/40075/jiahaolu/cleaned_code/DELTA_densetrack3d/checkpoints/sam2.1_hiera_large.pt"
 HOLI4D_CKPT="/group/40075/jiahaolu/MoGe/alltracker/checkpoints/cleaned_model.pth"
 
