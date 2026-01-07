@@ -6,6 +6,7 @@ import shutil
 import argparse
 import logging
 from typing import List, Dict, Union, Optional, Tuple
+from pathlib import Path
 
 import torch
 import numpy as np
@@ -240,18 +241,19 @@ def load_model(args, config: Dict) -> torch.nn.Module:
         **config['model'],
         seqlen=16,
         use_3d=True,
+        use_model=args.coordinate.split('_')[-1]
     )
 
     if args.ckpt_init and os.path.exists(args.ckpt_init):
         logger.info(f'Loading weights from local file: {args.ckpt_init}...')
         state_dict = torch.load(args.ckpt_init, map_location='cpu')
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     else:
         # Fallback to Hub download
         url = "https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth"
         logger.info(f'Local checkpoint not found. Downloading from {url}...')
         state_dict = torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     
     model.cuda()
     for p in model.parameters():
@@ -364,8 +366,8 @@ def forward_video3d_pair(rgbs: torch.Tensor, model: torch.nn.Module, args) -> Di
         select_views = range(0, T_full, 1)
     else:
         # Default stride logic (can be adjusted)
-        stride = 5
-        select_views = range(0, T_full, stride)
+        select_views = range(0, min(args.Ts, T_full), 1)
+        #select_views = range(0, T_full, 4)
     
     select_views = list(select_views)
     rgbs_selected = rgbs[:, select_views]
@@ -386,8 +388,11 @@ def forward_video3d_pair(rgbs: torch.Tensor, model: torch.nn.Module, args) -> Di
         traj_maps_2d = output[1]['flow_2d']
         visconf_maps = output[1]['visconf_maps_e']
         traj_maps_3d = output[1]['flow_3d']
+        world_points = output[0]['world_points']
+        camera_poses = output[0]['camera_poses']
         points = output[0]['points']
         masks = output[0]['mask']
+
 
     ftime = time.time() - f_start_time
     logger.info(f'3D (Pair) Forward pass finished; {ftime:.2f}s')
@@ -398,8 +403,10 @@ def forward_video3d_pair(rgbs: torch.Tensor, model: torch.nn.Module, args) -> Di
         'visconf': visconf_maps[0],  # (T, 2, H, W)
         'rgbs': rgbs_selected[0],    # (T, 3, H, W)
         'points': points[0],         # (T, H, W, 3)
-        'masks': masks[0]            # (T, H, W)
-    }
+        'masks': masks[0],            # (T, H, W)
+        'world_points': world_points[0],         # (T, H, W, 3)
+        'camera_poses': camera_poses           # (T, 4, 4)
+    }, select_views
 
 def forward_video3d_ff(rgbs: torch.Tensor, model: torch.nn.Module, args) -> Dict:
     """
@@ -434,6 +441,8 @@ def forward_video3d_ff(rgbs: torch.Tensor, model: torch.nn.Module, args) -> Dict
         traj_maps_3d = output[1]['flow_3d']
         points = output[0]['points']
         masks = output[0]['mask']
+        world_points = output[0]['world_points']
+        camera_poses = output[0]['camera_poses']
 
     ftime = time.time() - f_start_time
     logger.info(f'3D (Full) Forward pass finished; {ftime:.2f}s')
@@ -444,14 +453,17 @@ def forward_video3d_ff(rgbs: torch.Tensor, model: torch.nn.Module, args) -> Dict
         'visconf': visconf_maps[0],
         'rgbs': rgbs_selected[0],
         'points': points[0],
-        'masks': masks[0]
-    }
+        'masks': masks[0],
+        'world_points': world_points[0],         # (T, H, W, 3)
+        'camera_poses': camera_poses           # (T, 4, 4)
+        
+    }, select_views
 
 # ==============================================================================
 # Saving Logic: Long-term Trajectories & Point Clouds
 # ==============================================================================
 
-def save_efep(results: Dict, save_dir: str, W: int, H: int):
+def save_efep(results: Dict, masks_tensor, save_dir: str, W: int, H: int, vis_mode: str):
     """
     Computes and saves long-term 3D trajectories and visibility masks.
     
@@ -474,6 +486,14 @@ def save_efep(results: Dict, save_dir: str, W: int, H: int):
     
     rgbs = results['rgbs']
     points = results['points'].permute(0, -1, 1, 2)
+    if vis_mode == 'geometry':
+        points_vis = results['points'].permute(0, -1, 1, 2)
+    elif vis_mode == 'flow':
+        points_vis = results['traj_3d'].permute(0, -1, 1, 2)
+    else:
+        raise ValueError(f"Unknown visualization mode: {vis_mode}")
+    # print(points.shape, masks_tensor.shape)
+    camera_poses = results['camera_poses']
     masks = results['masks'][:, None]
 
     T_pairs = all_pairwise_flows_3d.shape[0]
@@ -487,7 +507,8 @@ def save_efep(results: Dict, save_dir: str, W: int, H: int):
     # Shape: (T, H*W, 3)
     trajectory_storage_3d = torch.full((NumFrames, H * W, 3), float('nan'),
                                          device=cpu_device, dtype=torch.float32)
-
+    trajectory_storage_dyn_mask = torch.full((NumFrames, H * W), 0.0,
+                                         device=cpu_device, dtype=torch.float32)
     # Initialize UV coordinates (Fixed reference frame)
     u, v = torch.meshgrid(
         torch.arange(H, device=device),
@@ -509,9 +530,16 @@ def save_efep(results: Dict, save_dir: str, W: int, H: int):
         # --- Clean Mask and Extract RGB ---
         mask_t_start_bool = masks[t_start].squeeze().cpu().numpy()
         depth_t_start_np = points[t_start, -1].cpu().numpy()
-        
         # Remove depth edges from mask to avoid flying pixels at object boundaries
-        mask_cleaned_t_start_np = mask_t_start_bool & ~utils3d.numpy.depth_edge(depth_t_start_np, rtol=0.04)
+        kernel_size = 4
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        dyn_mask = masks_tensor[t_start].cpu().numpy().astype(bool)  # (H, W, 1)
+        static_mask = ~dyn_mask
+        dyn_mask_eroded = (cv2.erode(dyn_mask.astype(np.uint8), kernel, iterations=2).astype(bool))
+        static_mask_eroded = (cv2.erode(static_mask.astype(np.uint8), kernel, iterations=10).astype(bool)) 
+        mask_eroded = dyn_mask_eroded | static_mask_eroded
+        mask_cleaned_t_start_np = mask_t_start_bool & ~utils3d.numpy.depth_edge(depth_t_start_np, rtol=0.04) & mask_eroded
+
         rgb_t_start_np = rgbs[t_start].permute(1, 2, 0).cpu().numpy().astype(np.float32) / 255.0
         points_t_start_torch = points[t_start].permute(1, 2, 0) # GPU
 
@@ -524,7 +552,7 @@ def save_efep(results: Dict, save_dir: str, W: int, H: int):
             tri=True
         )
         # Coordinate flip for visualization compatibility
-        vertices_frame = vertices_frame * [1, -1, -1] 
+        # vertices_frame = vertices_frame * [1, -1, -1] 
         
         save_ply(
             f"{save_dir}/frame_{t_start:03d}.ply",
@@ -534,22 +562,57 @@ def save_efep(results: Dict, save_dir: str, W: int, H: int):
             None
         )
         
+        _, visconf_flow, _, _ = utils3d.numpy.image_mesh(                    
+            masks_tensor[t_start].cpu().numpy()[..., None],
+            rgb_t_start_np,
+            utils3d.numpy.image_uv(width=W, height=H),
+            mask=mask_cleaned_t_start_np,
+            tri=True
+        )
+
+        np.save(f"{save_dir}/pc_dyn_mask_{t_start:03d}.npy", visconf_flow)
         # Stop here for last frame
         if t_start == NumFrames - 1:
             continue
         
+
+        # --- Save Flow PLY (Projected Points) ---
+        flows_t_start_torch = all_pairwise_flows_3d[t_start].permute(1, 2, 0)
+        faces_flow, vertices_flow, colors_flow, uvs_flow = utils3d.numpy.image_mesh(
+            flows_t_start_torch.cpu().numpy(),
+            rgb_t_start_np,
+            utils3d.numpy.image_uv(width=W, height=H),
+            mask=mask_cleaned_t_start_np,
+            tri=True
+        )
+        # vertices_flow = vertices_flow * [1, -1, -1]
+        
+        # Update mask for next iteration
+        mask_cleaned_t_start_np_pre = torch.from_numpy(mask_cleaned_t_start_np).to(device)
+        
+        save_ply(
+            f"{save_dir}/flow_{t_start:03d}.ply",
+            vertices_flow,
+            np.zeros((0, 3), dtype=np.int32),
+            colors_flow,
+            None
+        )
+
+
         # Initial Frame Logic: Store t0 points
         if t_start == 0:
-            points_t0_cpu = points[t_start].permute(1, 2, 0).reshape(-1, 3).to(cpu_device)
+            points_t0_cpu = points_vis[t_start].permute(1, 2, 0).reshape(-1, 3).to(cpu_device)
             trajectory_storage_3d[t_start] = points_t0_cpu
+            masks_t0_cpu = masks_tensor[t_start].reshape(-1).to(cpu_device)
+            trajectory_storage_dyn_mask[t_start] = masks_t0_cpu
             continue
         
         # --- Tracking Logic (GPU) ---
         flow_2d_px_t_torch = all_pairwise_flows_2d[t_start - 1]
         # Visibility check: Confidence > 0.6 AND was valid in previous frame
         vis_t_torch = (all_visconf_maps[t_start - 1] > 0.6)[0] & mask_cleaned_t_start_np_pre
-        flow3d_torch = points[t_start]
-
+        flow3d_torch = points_vis[t_start]
+        dyn_mask_torch = masks_tensor[t_start]
         # Step 1: Get previous frame UVs
         uv_prev = current_uv_map.clone()
         uv_prev_int = uv_prev.round().long()
@@ -589,8 +652,10 @@ def save_efep(results: Dict, save_dir: str, W: int, H: int):
             continue
 
         P_valid_gpu = flow3d_torch[:, uv_t_int[valid_idx2, 1], uv_t_int[valid_idx2, 0]].permute(1, 0)
+        dyn_mask_valid_gpu = dyn_mask_torch[uv_t_int[valid_idx2, 1], uv_t_int[valid_idx2, 0]]
         # Offload to CPU storage
         trajectory_storage_3d[t_start, valid_idx2] = P_valid_gpu.to(cpu_device)
+        trajectory_storage_dyn_mask[t_start, valid_idx2] = dyn_mask_valid_gpu.to(cpu_device)
 
         # Step 4: Update current UV map for next iteration
         uv_t_int1 = uv_t_int.clone().float()
@@ -607,41 +672,26 @@ def save_efep(results: Dict, save_dir: str, W: int, H: int):
 
         if uv_rest.shape[0] > 0:
             P_new_gpu = flow3d_torch[:, uv_rest[:, 1], uv_rest[:, 0]].permute(1, 0)
-            
+            dyn_mask_new_gpu = dyn_mask_torch[uv_rest[:, 1], uv_rest[:, 0]]
             # Expand storage on CPU to accommodate new tracks
             new_storage_block_cpu = torch.full((NumFrames, uv_rest.shape[0] , 3), float('nan'),
                                                device=cpu_device, dtype=torch.float32)
             new_storage_block_cpu[t_start] = P_new_gpu.to(cpu_device)
             
+            new_storage_block_cpu_dyn = torch.full((NumFrames, uv_rest.shape[0]), float('nan'),
+                                               device=cpu_device, dtype=torch.float32)
+            new_storage_block_cpu_dyn[t_start] = dyn_mask_new_gpu.to(cpu_device)
             trajectory_storage_3d = torch.cat([trajectory_storage_3d, new_storage_block_cpu], dim=1)
-            
+            trajectory_storage_dyn_mask = torch.cat([trajectory_storage_dyn_mask, new_storage_block_cpu_dyn], dim=1)
             # Update UV map on GPU
             current_uv_map = torch.cat([current_uv_map, uv_rest], dim=0)
 
-        # --- Save Flow PLY (Projected Points) ---
-        flows_t_start_torch = all_pairwise_flows_3d[t_start].permute(1, 2, 0)
-        faces_flow, vertices_flow, colors_flow, uvs_flow = utils3d.numpy.image_mesh(
-            flows_t_start_torch.cpu().numpy(),
-            rgb_t_start_np,
-            utils3d.numpy.image_uv(width=W, height=H),
-            mask=mask_cleaned_t_start_np,
-            tri=True
-        )
-        vertices_flow = vertices_flow * [1, -1, -1]
-        
-        # Update mask for next iteration
-        mask_cleaned_t_start_np_pre = torch.from_numpy(mask_cleaned_t_start_np).to(device)
-        
-        save_ply(
-            f"{save_dir}/flow_{t_start:03d}.ply",
-            vertices_flow,
-            np.zeros((0, 3), dtype=np.int32),
-            colors_flow,
-            None
-        )
+
         
     logger.info(f"Saved {NumFrames} frames to {save_dir}")
     np.save(f"{save_dir}/trajectory_all_pointmap.npy", trajectory_storage_3d.numpy())
+    np.save(f"{save_dir}/trajectory_all_pointmap_dyn_mask.npy", trajectory_storage_dyn_mask.numpy())
+    np.save(f"{save_dir}/c2w.npy", camera_poses.cpu().numpy())
 
 def save_ff(results: Dict, save_dir: str, W: int, H: int):
     """
@@ -654,6 +704,7 @@ def save_ff(results: Dict, save_dir: str, W: int, H: int):
     traj_3dmaps_e = results['traj_3d']
     rgbs = results['rgbs']
     points = results['points']
+    camera_poses = results['camera_poses']
     masks = results['masks']
     visconf = (results['visconf'][:, 0].cuda() * results['visconf'][:, 1].cuda())
     T = traj_3dmaps_e.shape[0]
@@ -682,7 +733,7 @@ def save_ff(results: Dict, save_dir: str, W: int, H: int):
             mask=mask_cleaned_frame,
             tri=True
         )
-        vertices_frame = vertices_frame * [1, -1, -1]
+        # vertices_frame = vertices_frame * [1, -1, -1]
         
         save_ply(
             f"{save_dir}/frame_{t:03d}.ply", 
@@ -701,7 +752,7 @@ def save_ff(results: Dict, save_dir: str, W: int, H: int):
             mask=mask_cleaned, 
             tri=True
         )
-        vertices_flow = vertices_flow * [1, -1, -1]
+        # vertices_flow = vertices_flow * [1, -1, -1]
         
         # Save visibility map for debugging
         _, visconf_flow, _, _ = utils3d.numpy.image_mesh(                    
@@ -722,7 +773,7 @@ def save_ff(results: Dict, save_dir: str, W: int, H: int):
         )
 
     logger.info(f"Saved {T} frames to {save_dir}")
-
+    np.save(f"{save_dir}/c2w.npy", camera_poses.cpu().numpy())
 # ==============================================================================
 # Main Logic
 # ==============================================================================
@@ -740,21 +791,63 @@ def run_demo(model, args):
 
     H_orig, W_orig = rgbs[0].shape[:2]
     
+        
+    # --- New: Load Dynamic Masks ---
+    mask_dir = Path(args.save_base_dir).joinpath("mask")
+    logger.info(f"Loading masks from: {mask_dir}")
+
+    # Get all mask files and sort them (assuming png or jpg format)
+    mask_files = sorted(list(mask_dir.glob("*.png")) + list(mask_dir.glob("*.jpg")))
+
+    if len(mask_files) < len(rgbs):
+        logger.warning(f"Warning: Fewer masks ({len(mask_files)}) than video frames ({len(rgbs)}).")
+
     # 2. Preprocessing (Crop and Resize)
     if args.max_frames and len(rgbs) > args.max_frames:
         logger.info(f"Clipping video to first {args.max_frames} frames.")
         rgbs = rgbs[:args.max_frames]
-        
+        mask_files = mask_files[:args.max_frames]
+
     # Calculate scale to fit image_size while maintaining aspect ratio
     scale = min(int(args.image_size) / H_orig, int(args.image_size) / W_orig)
     H, W = int(H_orig * scale), int(W_orig * scale)
+
     # Ensure dimensions are divisible by 64 (common requirement for UNet architectures)
     H, W = (H // 64) * 64, (W // 64) * 64
-    
-    logger.info(f"Resizing video from ({H_orig}, {W_orig}) to ({H}, {W})")
-    rgbs_resized = [cv2.resize(rgb, dsize=(W, H), interpolation=cv2.INTER_LINEAR) for rgb in rgbs]
 
+    logger.info(f"Resizing video from ({H_orig}, {W_orig}) to ({H}, {W})")
+    rgbs_resized = [
+        cv2.resize(rgb, dsize=(W, H), interpolation=cv2.INTER_LINEAR)
+        for rgb in rgbs
+    ]
+
+    masks_processed = []
+    for m_path in mask_files:
+        # Read mask image
+        mask_img = cv2.imread(str(m_path))  # (H_orig, W_orig, 3)
+
+        if mask_img is None:
+            logger.error(f"Failed to read mask: {m_path}")
+            continue
+
+        # Resize mask
+        # NOTE: Use INTER_NEAREST for masks to avoid interpolation artifacts
+        # and preserve binary (0/1) values along object boundaries
+        mask_resized = cv2.resize(
+            mask_img, dsize=(W, H), interpolation=cv2.INTER_NEAREST
+        )
+
+        # Binarization logic:
+        # Color (0, 0, 0) indicates static regions;
+        # any non-zero value in any channel indicates dynamic regions
+        is_dynamic = np.any(mask_resized > 0, axis=-1).astype(np.float32)  # (H, W)
+
+        masks_processed.append(is_dynamic)
+
+    
     # 3. Convert to Tensor
+
+    masks_tensor = torch.stack([torch.from_numpy(m) for m in masks_processed], dim=0)
     rgbs_tensor = [torch.from_numpy(rgb).permute(2, 0, 1) for rgb in rgbs_resized]
     rgbs_tensor = torch.stack(rgbs_tensor, dim=0).unsqueeze(0).float() # 1, T, C, H, W
     logger.info(f"Input Tensor Shape: {rgbs_tensor.shape}")
@@ -768,14 +861,38 @@ def run_demo(model, args):
         
         elif args.mode == '3d_efep':
             logger.info("--- Running 3D Pair Mode (Every Frame Every Pixel) ---")
-            results = forward_video3d_pair(rgbs_tensor.cuda(), model, args)
+            results, select_views = forward_video3d_pair(rgbs_tensor.cuda(), model, args)
         
         elif args.mode == '3d_ff':
             logger.info("--- Running 3D First Frame Tracking Mode ---")
-            results = forward_video3d_ff(rgbs_tensor.cuda(), model, args)
+            results, select_views = forward_video3d_ff(rgbs_tensor.cuda(), model, args)
         
         else:
             logger.warning("No valid mode selected ('2d', '3d_efep' or '3d_ff').")
+    
+    masks_tensor = masks_tensor[select_views]
+    rgbs_tensor = rgbs_tensor[:, select_views]
+
+    save_rgb_dir = os.path.join(args.save_base_dir, "final_rgb")
+    save_mask_dir = os.path.join(args.save_base_dir, "final_dyn_mask")
+
+    os.makedirs(save_rgb_dir, exist_ok=True)
+    os.makedirs(save_mask_dir, exist_ok=True)
+
+    for i, idx in enumerate(select_views):
+        # RGB: shape (C, H, W) → convert to HWC for cv2
+        rgb_img = np.transpose(rgbs_tensor[0, i].numpy(), (1, 2, 0)).astype(np.uint8)
+        rgb_path = os.path.join(save_rgb_dir, f"frame_{i:04d}.png")
+        cv2.imwrite(rgb_path, cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR))  # cv2 使用 BGR
+
+        # Mask: 0=static, 1=dynamic → scale to 0/255
+        mask_img = (masks_tensor[i].numpy() * 255).astype(np.uint8)
+        mask_path = os.path.join(save_mask_dir, f"mask_{i:04d}.png")
+        cv2.imwrite(mask_path, mask_img)
+
+    logger.info(f"Saved {len(select_views)} frames to:")
+    logger.info(f"  RGBs: {save_rgb_dir}")
+    logger.info(f"  Masks: {save_mask_dir}")
     
     # 5. Post-processing / Saving 3D results
     if results:
@@ -787,7 +904,7 @@ def run_demo(model, args):
             logger.info(f"No save_base_dir provided, saving to {save_dir}")
 
         if args.mode == '3d_efep':
-            save_efep(results, save_dir, W, H)
+            save_efep(results, masks_tensor.cuda(), save_dir, W, H, args.vis_mode)
         elif args.mode == '3d_ff':
             save_ff(results, save_dir, W, H)
 
@@ -797,23 +914,27 @@ def main():
     parser = argparse.ArgumentParser(description="Holi4D Demo Script")
     
     # --- Paths and Model Config ---
-    parser.add_argument("--ckpt_init", type=str, default=None, help="Path to local checkpoint file (optional)")
-    parser.add_argument("--mp4_path", type=str, required=True, help="Input MP4 video file path")
-    parser.add_argument("--config_path", type=str, default='./holi4d/config/eval/v1.json', help="Path to model config json")
+    parser.add_argument("--ckpt_init", type=str, default='checkpoints/holi4d.pth', help="Path to local checkpoint file (optional)")
+    parser.add_argument("--mp4_path", type=str, default='demo_data/cat.mp4', help="Input MP4 video file path")
+    parser.add_argument("--config_path", type=str, default='holi4d/config/eval/v1.json', help="Path to model config json")
     
     # --- Output ---
-    parser.add_argument("--save_base_dir", type=str, default=None, help="Root directory for output.")
+    parser.add_argument("--save_base_dir", type=str, default='results/horsejump-high', help="Root directory for output.")
 
     # --- Mode Selection ---
-    parser.add_argument("--mode", type=str, default='3d_efep', choices=['2d', '3d_ff', '3d_efep'],
+    parser.add_argument("--mode", type=str, default='3d_ff', choices=['2d', '3d_ff', '3d_efep'],
     help=" '2d': 2d tracking, '3d_ff': 3d first frame tracking, '3d_efep' 3d tracking every pixel of every frame")
+    parser.add_argument("--vis_mode", type=str, default='geometry', choices=['flow', 'geometry'],
+    help=" 'flow': visualize flow, 'geometry': visualize geometry")
+    parser.add_argument("--coordinate", type=str, default='camera_base', choices=['camera_base', 'world_pi3', 'world_depthanythingv3'],
 
+    help=" 'camera': camera centric, 'world': world centric")
     # --- Inference Params ---
     parser.add_argument("--query_frame", type=int, default=0, help="Start frame index for tracking")
     parser.add_argument("--image_size", type=int, default=640, help="Max image dimension for resize")
     parser.add_argument("--max_frames", type=int, default=400, help="Max frames to process")
     parser.add_argument("--inference_iters", type=int, default=4, help="Model inference iterations")
-    parser.add_argument("--Ts", type=int, default=48, help="Frame stride/selection count for 3D modes")
+    parser.add_argument("--Ts", type=int, default=-1, help="Frame stride/selection count for 3D modes")
     
     # --- 2D Vis Params ---
     parser.add_argument("--rate", type=int, default=1, help="[VIS] Sampling rate")

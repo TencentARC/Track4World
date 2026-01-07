@@ -295,7 +295,8 @@ def test_flow(model: torch.nn.Module, args: argparse.Namespace):
                 is_training=False, 
                 tracking3d=True, 
                 force_projection=True, 
-                apply_mask=False
+                apply_mask=False,
+                aligned_scene_flow=False
             )
         
         # 5. Process Predictions
@@ -369,19 +370,19 @@ def test_flow(model: torch.nn.Module, args: argparse.Namespace):
         for key, val in metrics_pc.items():
             metrics_all[key] += 0 if math.isnan(val) else val
 
-    # 10. Print Final Results
-    logger.info("Evaluation Complete. Results:")
-    table = PrettyTable(['Metric', 'Value'])
-    
-    for key in metrics_all:
-        if key in ["abs_rel", "threshold_1"]:
-            # These metrics were calculated on concatenated (points + flow), so divide by 2*count
-            val = metrics_all[key] / (2 * count_all)
-        else:
-            val = metrics_all[key] / count_all
-        table.add_row([key, f"{val:.4f}"])
-    
-    print(table)
+        # 10. Print Final Results
+        logger.info("Evaluation Complete. Results:")
+        table = PrettyTable(['Metric', 'Value'])
+        
+        for key in metrics_all:
+            if key in ["abs_rel", "threshold_1"]:
+                # These metrics were calculated on concatenated (points + flow), so divide by 2*count
+                val = metrics_all[key] / (2 * count_all)
+            else:
+                val = metrics_all[key] / count_all
+            table.add_row([key, f"{val:.4f}"])
+        
+        print(table)
 
 
 # ==============================================================================
@@ -403,13 +404,13 @@ def load_model(args: argparse.Namespace, config: Dict) -> torch.nn.Module:
     if args.ckpt_init and os.path.exists(args.ckpt_init):
         logger.info(f'Loading weights from local file: {args.ckpt_init}...')
         state_dict = torch.load(args.ckpt_init, map_location='cpu')
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     else:
         # Fallback to Hub download
         url = "https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth"
         logger.info(f'Local checkpoint not found. Downloading from {url}...')
         state_dict = torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     
     model.cuda()
     model.eval()
@@ -435,7 +436,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ckpt_init",
         type=str,
-        default="/group/40075/jiahaolu/MoGe/alltracker/checkpoints/cleaned_model.pth",
+        default="./checkpoints/holi4d.pth",
         help="Path to model checkpoint file"
     )
 

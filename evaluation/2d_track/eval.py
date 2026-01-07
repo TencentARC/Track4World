@@ -423,12 +423,12 @@ def load_model(args: argparse.Namespace, config) -> torch.nn.Module:
     if args.ckpt_init and os.path.exists(args.ckpt_init):
         print(f"Loading checkpoint from: {args.ckpt_init}")
         state_dict = torch.load(args.ckpt_init, map_location='cpu')
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     else:
         print("Checkpoint not found locally. Downloading from HuggingFace Hub...")
         url = "https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth"
         state_dict = torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     
     model.cuda()
     model.eval()
@@ -459,7 +459,7 @@ if __name__ == "__main__":
     
     # Model & Checkpoint
     parser.add_argument("--ckpt_init", type=str, 
-                        default="/group/40075/jiahaolu/MoGe/alltracker/checkpoints/cleaned_model.pth",
+                        default="./checkpoints/holi4d.pth",
                         help="Path to model checkpoint file")
     parser.add_argument("--config_path", type=str, default="./holi4d/config/eval/v1.json",
                         help="Path to model configuration JSON file")

@@ -145,7 +145,7 @@ def main(
         gui_timestep = server.gui.add_slider("Timestep", min=0, max=num_frames - 1, step=1, initial_value=0)
         
         # Appearance
-        gui_point_size = server.gui.add_slider("Point size", min=0.001, max=0.05, step=0.001, initial_value=0.01)
+        gui_point_size = server.gui.add_slider("Point size", min=0.001, max=10, step=0.001, initial_value=0.01)
         gui_line_width = server.gui.add_slider("Line width", min=0.1, max=5.0, step=0.1, initial_value=0.5)
         gui_max_traj_length = server.gui.add_slider("Trail Length (Frames)", min=1, max=50, step=1, initial_value=5)
 

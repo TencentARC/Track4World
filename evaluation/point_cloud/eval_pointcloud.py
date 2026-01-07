@@ -350,12 +350,12 @@ def load_model(args: argparse.Namespace, config: Dict) -> torch.nn.Module:
     if args.ckpt_init and os.path.exists(args.ckpt_init):
         logger.info(f'Loading weights from local file: {args.ckpt_init}...')
         state_dict = torch.load(args.ckpt_init, map_location='cpu')
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     else:
         url = "https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth"
         logger.info(f'Local checkpoint not found. Downloading from {url}...')
         state_dict = torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     
     device = torch.device(args.device_name)
     model.to(device)
@@ -515,7 +515,7 @@ def main():
     parser = argparse.ArgumentParser(description="Holi4D Inference and Evaluation Script")
 
     # --- Model Configuration ---
-    parser.add_argument("--ckpt_init", type=str, default="/group/40075/jiahaolu/MoGe/alltracker/checkpoints/cleaned_model.pth", help="Path to model checkpoint")
+    parser.add_argument("--ckpt_init", type=str, default="./checkpoints/holi4d.pth", help="Path to model checkpoint")
     parser.add_argument("--config_path", type=str, default="./holi4d/config/eval/v1.json", help="Path to model config JSON")
     parser.add_argument("--output", "-o", dest="output_path", type=str, default='./output_sintel/23', help="Output folder path")
     parser.add_argument("--device", dest="device_name", type=str, default='cuda', help="Device name")

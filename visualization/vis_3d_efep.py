@@ -22,7 +22,7 @@ except ImportError:
 # Global Constants
 # Sampling rate: Downsample points to maintain performance during visualization.
 DEFAULT_POINT_DOWNSAMPLE_RATE = 10
-
+MAX_DISPLACEMENT = 1.0
 
 # ==============================================================================
 # Helper Functions
@@ -61,7 +61,7 @@ def remove_radius_outlier_gpu(points: np.ndarray, nb_points: int = 40, radius: f
     return points[mask].cpu().numpy(), np.nonzero(mask.cpu().numpy())[0]
 
 
-def remove_radius_outlier_open3d(points: np.ndarray, nb_points: int = 40, radius: float = 0.01) -> Tuple[np.ndarray, np.ndarray]:
+def remove_radius_outlier_open3d(points: np.ndarray, nb_points: int = 20, radius: float = 0.001) -> Tuple[np.ndarray, np.ndarray]:
     """
     Removes outliers using Open3D (CPU implementation).
     
@@ -86,6 +86,30 @@ def remove_radius_outlier_open3d(points: np.ndarray, nb_points: int = 40, radius
     
     return points_filtered, np.array(ind)
 
+def remove_std_outlier_open3d(points: np.ndarray, nb_neighbors: int = 30, std_ratio: float = 2.0) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Removes outliers using Open3D (CPU implementation).
+    
+    Args:
+        points: Input point cloud data (N, 3).
+        nb_points: Number of neighbors to check.
+        radius: Search radius.
+        
+    Returns:
+        Tuple containing filtered points and indices of kept points.
+    """
+    # 1. Convert numpy array to Open3D PointCloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    # 2. Call Open3D's efficient C++ implementation
+    #    Returns: (filtered_pcd, indices_list)
+    pcd_filtered, ind = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+    
+    # 3. Convert back to numpy
+    points_filtered = np.asarray(pcd_filtered.points)
+    
+    return points_filtered, np.array(ind)
 
 # ==============================================================================
 # Main Execution
@@ -126,6 +150,12 @@ def main(
         raise FileNotFoundError(f"Trajectory file not found: {traj_path}")
         
     trajectory_all_raw = np.load(str(traj_path))
+
+    c2w_path = ply_dir / 'c2w.npy'
+    if not c2w_path.exists():
+        raise FileNotFoundError(f"Camera pose file not found: {c2w_path}")
+    c2w = np.load(str(c2w_path))
+
     initial_colors = None
     point_nodes: List[viser.PointCloudHandle] = []
 
@@ -136,10 +166,9 @@ def main(
         pcd = o3d.io.read_point_cloud(str(ply_file))
         
         # Basic cleanup
-        _, ind = pcd.remove_radius_outlier(nb_points=10, radius=0.001)
-        
+        # _, ind = pcd.remove_radius_outlier(nb_points=10, radius=0.001)
         # Scale and flip coordinates
-        points_all = 100 * np.asarray(pcd.points) * [1, -1, -1]
+        points_all = 100 * np.asarray(pcd.points)
         colors_all = np.asarray(pcd.colors)
 
         # Initialize colors based on the first frame (Logic from original code)
@@ -163,7 +192,7 @@ def main(
 
     # --- Process Trajectory Data ---
     # Use the raw loaded trajectory data
-    trajectories_3d = trajectory_all_raw
+    trajectories_3d = trajectory_all_raw.copy()
     
     # Create visibility mask (True where data is not NaN)
     visibility_mask = ~np.isnan(trajectory_all_raw).any(axis=-1)  # [T, N]
@@ -175,14 +204,15 @@ def main(
         if pts.shape[0] == 0:
             continue
             
-        _, ind = remove_radius_outlier_open3d(pts, nb_points=20, radius=0.001)
+        _, ind = remove_std_outlier_open3d(pts)
         
         # Update mask based on inliers
         mask = visibility_mask[i].copy()
         valid_indices = np.where(mask)[0]
-        filtered_indices = valid_indices[ind]
         new_mask = np.zeros_like(mask, dtype=bool)
-        new_mask[filtered_indices] = True
+        if ind.shape[0] > 0:
+            filtered_indices = valid_indices[ind]
+            new_mask[filtered_indices] = True
         visibility_mask[i] = new_mask
 
     # Apply initial downsampling
@@ -218,7 +248,7 @@ def main(
     # --- GUI Controls ---
     with server.gui.add_folder("Playback"):
         # Appearance
-        gui_point_size = server.gui.add_slider("Point size", min=0.00001, max=0.02, step=1e-3, initial_value=0.008)
+        gui_point_size = server.gui.add_slider("Point size", min=0.00001, max=2, step=1e-3, initial_value=0.008)
         gui_line_width = server.gui.add_slider("Line width", min=0.01, max=10, step=0.01, initial_value=0.3)
         
         # Playback
@@ -230,7 +260,7 @@ def main(
         gui_show_trajectories = server.gui.add_checkbox("Show Trajectories", True)
         gui_max_traj_length = server.gui.add_slider("Max trajectory length", min=1, max=200, step=1, initial_value=5)
         gui_downsample = server.gui.add_slider("Downsample rate", min=1, max=500, step=1, initial_value=DEFAULT_POINT_DOWNSAMPLE_RATE)
-        
+        gui_max_displacement = server.gui.add_slider("Displacement value", min=0.01, max=100, step=0.01, initial_value=MAX_DISPLACEMENT)
         # Visualization Mode
         gui_vis_mode = server.gui.add_button_group("Visualization Mode", ("PointCloud", "Tracking", "Both"))
         gui_vis_mode.value = "Both"
@@ -313,8 +343,7 @@ def main(
 
         # Filter out large jumps (teleportation artifacts)
         displacement = np.linalg.norm(curr_positions - prev_positions, axis=1)
-        MAX_DISPLACEMENT = 1.0
-        valid_mask = displacement < MAX_DISPLACEMENT
+        valid_mask = displacement < gui_max_displacement.value
         
         prev_positions = prev_positions[valid_mask]
         curr_positions = curr_positions[valid_mask]

@@ -23,7 +23,10 @@ from holi4d.utils.geometry_torch import (
 )
 from holi4d.utils import misc
 from holi4d.nets.global_aggregator import Global_Aggregator
-
+from holi4d.nets.external.pi3.models.pi3 import Pi3
+from holi4d.nets.external.depth_anything_3.api import DepthAnything3
+from holi4d.utils.geometry_torch import mask_aware_nearest_resize
+from holi4d.utils.alignment import align_points_scale_xyz_shift
 
 class ResidualConvBlock(nn.Module):
     """
@@ -83,6 +86,100 @@ def homogenize_points(points: torch.Tensor) -> torch.Tensor:
     """Convert batched points (xyz) to homogeneous coordinates (xyz1)."""
     return torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
 
+def process_geometry(depth, extrinsics, intrinsics):
+    """
+    Args:
+        depth: (B, T, H, W)
+        extrinsics: (B, T, 3, 4), assumed to be OpenCV-style World-to-Camera (W2C)
+        intrinsics: (B, T, 3, 3)
+    Returns:
+        world_points: (T, 3, H, W)
+        camera_points: (T, 3, H, W)
+        camera_poses: (T, 4, 4), Camera-to-World (C2W)
+    """
+    B, T, H, W = depth.shape
+    device = depth.device
+
+    # ==========================================
+    # 1. Generate pixel grid
+    # ==========================================
+    # y: (H, W), x: (H, W)
+    y, x = torch.meshgrid(
+        torch.arange(H, device=device),
+        torch.arange(W, device=device),
+        indexing='ij'
+    )
+
+    # Flatten and expand dimensions: (1, 1, H*W)
+    x = x.reshape(1, 1, -1).float()
+    y = y.reshape(1, 1, -1).float()
+
+    # Flatten depth map: (B, T, H*W)
+    depth_flat = depth.reshape(B, T, -1)
+
+    # ==========================================
+    # 2. Compute camera-space points (back-projection)
+    # ==========================================
+    # Extract intrinsic parameters fx, fy, cx, cy
+    # intrinsics: (B, T, 3, 3)
+    fx = intrinsics[..., 0, 0].unsqueeze(-1)  # (B, T, 1)
+    fy = intrinsics[..., 1, 1].unsqueeze(-1)
+    cx = intrinsics[..., 0, 2].unsqueeze(-1)
+    cy = intrinsics[..., 1, 2].unsqueeze(-1)
+
+    # Back-projection equations:
+    # X = (u - cx) * Z / fx
+    # Y = (v - cy) * Z / fy
+    # Z = depth
+    X_cam = (x - cx) * depth_flat / fx
+    Y_cam = (y - cy) * depth_flat / fy
+    Z_cam = depth_flat
+
+    # Stack to obtain camera-space points: (B, T, 3, H*W)
+    cam_points_flat = torch.stack([X_cam, Y_cam, Z_cam], dim=2)
+
+    # Reshape for output: (B, T, 3, H, W) -> squeeze B -> (T, 3, H, W)
+    camera_points = cam_points_flat.reshape(B, T, 3, H, W).squeeze(0)
+
+    # ==========================================
+    # 3. Compute camera poses (W2C -> C2W)
+    # ==========================================
+    # Input extrinsics are 3x4 matrices; convert them to 4x4
+    # by appending the homogeneous row [0, 0, 0, 1]
+    bottom_row = torch.tensor(
+        [0, 0, 0, 1],
+        device=device,
+        dtype=extrinsics.dtype
+    ).view(1, 1, 1, 4)
+    bottom_row = bottom_row.expand(B, T, 1, 4)
+
+    w2c_4x4 = torch.cat([extrinsics, bottom_row], dim=2)  # (B, T, 4, 4)
+
+    # Invert to obtain Camera-to-World (C2W) poses
+    c2w_4x4 = torch.inverse(w2c_4x4)
+
+    # Output camera poses: (T, 4, 4)
+    camera_poses = c2w_4x4.squeeze(0)
+
+    # ==========================================
+    # 4. Compute world-space points
+    # ==========================================
+    # P_world = R_c2w @ P_cam + t_c2w
+    # Alternatively, using homogeneous coordinates:
+    # P_world_homo = T_c2w @ P_cam_homo
+
+    # Extract rotation R (B, T, 3, 3) and translation t (B, T, 3, 1)
+    R_c2w = c2w_4x4[..., :3, :3]
+    t_c2w = c2w_4x4[..., :3, 3:4]
+
+    # Matrix multiplication:
+    # (B, T, 3, 3) @ (B, T, 3, H*W) -> (B, T, 3, H*W)
+    world_points_flat = torch.matmul(R_c2w, cam_points_flat) + t_c2w
+
+    # Reshape to output format: (T, 3, H, W)
+    world_points = world_points_flat.reshape(B, T, 3, H, W).squeeze(0)
+
+    return world_points, camera_points, camera_poses
 
 class Head(nn.Module):
     """
@@ -191,6 +288,153 @@ class Head(nn.Module):
 
         return output
 
+def get_aligned_scene_flow_temporal(flow2d_c, flow3d, points, visconf_maps_e, mode='align_direction'):
+    """
+    Args:
+        flow2d_c: [B, T-1, H, W, 2]
+        flow3d:   [B, T-1, H, W, 3] (Predicted scene flow to be aligned)
+        points:   [B, T, H, W, 3]   (Point sequence)
+        visconf_maps_e: [B, T-1, H, W, 2]
+        align_func: function(pred, target) -> a, b (External function)
+
+    Returns:
+        s_aligned_final: [B, T-1, H, W, 3]
+        valid_mask_final: [B, T-1, H, W]
+    """
+    B, T_minus_1, H, W, _ = flow2d_c.shape
+
+    # -----------------------------------------------------------
+    # 1. Data preparation: temporal slicing and flattening
+    # -----------------------------------------------------------
+
+    # points[:, t] is the source point cloud, corresponding to the start of flow2d_c[:, t]
+    # points[:, t+1] is the target point cloud, corresponding to the end of flow2d_c[:, t]
+    # We take the first T-1 frames as p_cur and the last T-1 frames as p_next
+
+    p_cur = points[:, :-1]  # [B, T-1, H, W, 3]
+    p_next = points[:, 1:]  # [B, T-1, H, W, 3]
+
+    # Merge the B and T-1 dimensions and treat them as N independent samples
+    # N = B * (T-1)
+    p_cur_flat = p_cur.reshape(-1, H, W, 3)      # [N, H, W, 3]
+    p_next_flat = p_next.reshape(-1, H, W, 3)    # [N, H, W, 3]
+    flow2d_flat = flow2d_c.reshape(-1, H, W, 2)  # [N, H, W, 2]
+
+    # Predicted scene flow (relative displacement)
+    if mode == 'align_geo':
+        s_pred_flat = flow3d.reshape(-1, H, W, 3)
+    elif mode == 'align_dir':
+        s_pred_flat = flow3d.reshape(-1, H, W, 3) - p_cur_flat  # [N, H, W, 3]
+    else:
+        raise ValueError(f"Unknown alignment mode: {mode}")
+
+    visconf_flat = visconf_maps_e.reshape(-1, H, W, 2)  # [N, H, W, 2]
+
+    N = p_cur_flat.shape[0]
+
+    # -----------------------------------------------------------
+    # 2. Geometric scene flow computation (optical flow + depth indexing)
+    # -----------------------------------------------------------
+
+    # Compute target sampling coordinates: pixel location + optical flow
+    target_coords = flow2d_flat
+
+    # Normalize coordinates to [-1, 1] for grid_sample
+    norm_target_coords = target_coords.clone()
+    norm_target_coords[..., 0] = 2.0 * target_coords[..., 0] / (W - 1) - 1.0
+    norm_target_coords[..., 1] = 2.0 * target_coords[..., 1] / (H - 1) - 1.0
+
+    # Sample P_next
+    # grid_sample expects inputs of shape [N, C, H, W] and grid of shape [N, H, W, 2]
+    p_next_permuted = p_next_flat.permute(0, 3, 1, 2)  # [N, 3, H, W]
+
+    # Key step: sample corresponding geometric points from p_next
+    p_next_sampled = F.grid_sample(
+        p_next_permuted,
+        norm_target_coords,
+        mode='bilinear',
+        align_corners=True,
+        padding_mode='zeros'  # Out-of-bound samples are set to zero; handled later by masks
+    )
+    p_next_sampled = p_next_sampled.permute(0, 2, 3, 1)  # [N, H, W, 3]
+
+    # Compute geometric scene flow: S_geo = P_next(u + flow) - P_cur(u)
+    if mode == 'align_geo':
+        # Use absolute 3D points in the next frame as geometric target
+        s_geo_flat = p_next_sampled
+    elif mode == 'align_dir':
+        # Use relative displacement (scene flow) as geometric target
+        s_geo_flat = p_next_sampled - p_cur_flat
+    else:
+        raise ValueError(f"Unknown alignment mode: {mode}")
+    # -----------------------------------------------------------
+    # 3. Valid mask computation
+    # -----------------------------------------------------------
+
+    # Base confidence mask
+    conf_val = visconf_flat[..., 0] * visconf_flat[..., 1]
+    valid_mask_flat = conf_val > 0.6  # [N, H, W]
+
+    # Additional geometric validity checks (optional but recommended):
+    # 1. Sampled points must lie within the image bounds
+    in_bounds = (norm_target_coords.abs().max(dim=-1)[0] <= 1.0)
+
+    # 2. Sampled points must have valid depth (assume zero indicates invalid points)
+    has_depth = (
+        (p_next_sampled.abs().sum(dim=-1) > 1e-4) &
+        (p_cur_flat.abs().sum(dim=-1) > 1e-4)
+    )
+    # Combine all validity masks
+    final_mask_flat = valid_mask_flat & in_bounds & has_depth
+
+    # -----------------------------------------------------------
+    # 4. Alignment
+    # -----------------------------------------------------------
+
+    # Initialize output container
+    s_aligned_flat = s_pred_flat.clone()
+
+    # Since align_func usually solves a least-squares problem over valid points,
+    # and each sample has a different number of valid points,
+    # full vectorization is difficult. We therefore iterate over the N samples.
+    # N is typically small, so this is acceptable in practice.
+
+    for i in range(N):
+        mask_i = final_mask_flat[i]
+        try:
+            _, lr_mask, lr_index = mask_aware_nearest_resize(
+                None, mask_i, (32, 32), return_index=True
+            )
+            s_pred_valid = s_pred_flat[i][lr_index][lr_mask]
+            s_geo_valid = s_geo_flat[i][lr_index][lr_mask]
+
+            scale, shift = align_points_scale_xyz_shift(
+                s_pred_valid,
+                s_geo_valid,
+                1 / torch.ones_like(s_geo_valid.norm(dim=-1) + 1e-6),
+                exp=20
+            )
+
+            # Apply the alignment parameters to the full-resolution scene flow
+            # Broadcast scale and shift over the entire frame
+            s_aligned_flat[i] = scale * s_pred_flat[i] + shift
+
+        except Exception:
+            # If alignment fails (e.g., due to a singular system),
+            # fall back to the original prediction
+            pass
+
+    # -----------------------------------------------------------
+    # 5. Restore original dimensions
+    # -----------------------------------------------------------
+    if mode == 'align_geo':
+        s_aligned_final = s_aligned_flat.reshape(B, T_minus_1, H, W, 3)
+    elif mode == 'align_dir':
+        s_aligned_final = (s_aligned_flat + p_cur_flat).reshape(B, T_minus_1, H, W, 3)
+    else:
+        raise ValueError(f"Unknown alignment mode: {mode}")
+
+    return s_aligned_final
 
 class Holi4D(nn.Module):
     """
@@ -225,6 +469,7 @@ class Holi4D(nn.Module):
         last_conv_size: int = 1,
         mask_threshold: float = 0.5,
         use_3d: bool = False,
+        use_model: Literal['base', 'pi3', 'depthanythingv3'] = 'depthanythingv3',
         **deprecated_kwargs
     ):
         super(Holi4D, self).__init__()
@@ -236,13 +481,17 @@ class Holi4D(nn.Module):
         self.intermediate_layers = intermediate_layers
         self.num_tokens_range = num_tokens_range
         self.mask_threshold = mask_threshold
-
+        self.use_model = use_model
         # --- Backbone (DINOv2) and Feature Extractor ---
         # Dynamically load the DINOv2 backbone from the local hub
         hub_loader = getattr(importlib.import_module(".dinov2.hub.backbones", __package__), encoder)
         self.backbone = hub_loader(pretrained=False)
         self.dim_feature = self.backbone.blocks[0].attn.qkv.in_features
-        
+        if use_model == 'pi3':
+            self.pi3 = Pi3.from_pretrained("yyfz233/Pi3")
+            self.mask_threshold = 0.05
+        elif use_model == 'depthanythingv3':
+            self.dav3 = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE")
         # Token initialization (Register tokens and Camera tokens)
         num_register_tokens = 4
         register_token = nn.Parameter(torch.randn(1, 1, num_register_tokens, self.dim_feature))
@@ -422,7 +671,47 @@ class Holi4D(nn.Module):
             
             # Predict geometry (points and mask)
             points, mask = self.head(features, image)
-        
+            if self.use_model == 'pi3':
+                
+                results = self.pi3(image_14[None])
+                points = results['local_points'][0].permute(0, -1, 1, 2)
+                
+                #pts_raw = F.interpolate(points.clone(), (original_height, original_width), mode='bilinear', align_corners=False, antialias=False)
+                #pts_pi3 = F.interpolate(points.clone(), (original_height, original_width), mode='bilinear', align_corners=False, antialias=False)
+                #norm_head = torch.norm(pts_raw, dim=1)
+                #norm_pi3  = torch.norm(pts_pi3, dim=1)
+                #valid = (norm_pi3 > 1e-6) & (norm_head > 1e-6)
+                #scale = torch.median(norm_head[valid] / norm_pi3[valid])
+
+                world_points = results['points'][0].permute(0, -1, 1, 2)
+                camera_poses = results['camera_poses'][0]
+                conf = results['conf'][0].permute(0, -1, 1, 2)
+                mask = torch.sigmoid(conf)
+                points = points / 10
+                world_points = world_points / 10
+                camera_poses[..., :3, 3] /= 10
+            elif self.use_model == 'depthanythingv3':
+                results = self.dav3.inference_v2(
+                    image_14[None]
+                )
+                # pts_raw = F.interpolate(points.clone(), (original_height, original_width), mode='bilinear', align_corners=False, antialias=False)
+                world_points, points, camera_poses = process_geometry(results["depth"], results["extrinsics"], results["intrinsics"])
+                mask = results["depth_conf"].transpose(0, 1)
+                self.mask_threshold = torch.quantile(mask, 0.05)
+                # print(points.shape)
+                # pts_dav3 = F.interpolate(points.clone(), (original_height, original_width), mode='bilinear', align_corners=False, antialias=False)
+                # norm_head = torch.norm(pts_raw, dim=1)
+                # norm_dav3  = torch.norm(pts_dav3, dim=1)
+                # valid = (norm_dav3 > 1e-6) & (norm_head > 1e-6)
+                # scale = torch.median(norm_dav3 / norm_head)
+                # print(scale)
+                points = points / 100
+                world_points = world_points / 100
+                camera_poses[..., :3, 3] /= 100
+            else:
+                world_points = torch.zeros_like(points)
+                camera_poses = torch.zeros(points.shape[0], 4, 4).to(image_14.device)
+
         # Flow Feature extraction (in Autocast for efficiency)
         with torch.autocast(device_type=image_14.device.type, dtype=torch.float32):
             flow_features = self.dot_fc1(global_features[-1].detach())    
@@ -453,8 +742,10 @@ class Holi4D(nn.Module):
         # Process points and masks
         with torch.autocast(device_type=image_14.device.type, dtype=torch.float32):
             points = F.interpolate(points, (original_height, original_width), mode='bilinear', align_corners=False, antialias=False)
-            points = points.permute(0, 2, 3, 1)
-            points = self._remap_points(points).permute(0, -1, 1, 2)
+            world_points = F.interpolate(world_points, (original_height, original_width), mode='bilinear', align_corners=False, antialias=False)
+            if self.use_model == 'base':
+                points = points.permute(0, 2, 3, 1)
+                points = self._remap_points(points).permute(0, -1, 1, 2)
             mask = F.interpolate(mask, (original_height, original_width), mode='bilinear', align_corners=False, antialias=False)
         
         # Downsample points for flow correlation
@@ -463,10 +754,10 @@ class Holi4D(nn.Module):
             pm = pm.reshape(-1, pm.shape[-3], pm.shape[-2], pm.shape[-1])
         
         if self.use_3d:
-            return fmaps.to(image.dtype), ctxfeat.to(image.dtype), fmaps3d_detail.to(image.dtype), pm.to(image.dtype), points, mask
+            return fmaps.to(image.dtype), ctxfeat.to(image.dtype), fmaps3d_detail.to(image.dtype), pm.to(image.dtype), points, mask, world_points, camera_poses
         else:
             fmaps3d_detail = torch.zeros((pm.shape[0], self.flow3d_dim, flow_H, flow_W)).cuda()
-            return fmaps.to(image.dtype), ctxfeat.to(image.dtype), fmaps3d_detail.to(image.dtype), pm.to(image.dtype), points, mask
+            return fmaps.to(image.dtype), ctxfeat.to(image.dtype), fmaps3d_detail.to(image.dtype), pm.to(image.dtype), points, mask, world_points, camera_poses
 
     def forward(self, images, iters=4, sw=None, is_training=False, stride=None, tracking3d=False):
         """
@@ -503,7 +794,7 @@ class Holi4D(nn.Module):
         C1 = 128
 
         # Extract features (Geometry & Flow) for all frames
-        fmaps, ctxfeats, fmaps3d_detail, pms, points, _ = self.get_fmaps(images_, B, T, sw, is_training)
+        fmaps, ctxfeats, fmaps3d_detail, pms, points, _, world_points, camera_poses = self.get_fmaps(images_, B, T, sw, is_training)
         
         fmaps = fmaps.to(dtype).reshape(B, T, C, H8, W8)
         fmaps3d_detail = fmaps3d_detail.to(dtype).reshape(B, T, self.flow3d_dim, H8, W8)
@@ -655,9 +946,9 @@ class Holi4D(nn.Module):
             full_visconfs = full_visconfs[:, :T_bak]
         
         points = padder.unpad(points)
-
+        world_points = padder.unpad(world_points)
         if tracking3d:
-            return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, full_flows3d, all_flow3d_preds, points
+            return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, full_flows3d, all_flow3d_preds, points, world_points, camera_poses
         else:
             return full_flows, full_visconfs, all_flow_preds, all_visconf_preds
 
@@ -703,7 +994,7 @@ class Holi4D(nn.Module):
         C1 = 128
 
         # Extract Features
-        fmaps, ctxfeats, fmaps3d_detail, pms, points, masks = self.get_fmaps(images_, B, T, sw, is_training)
+        fmaps, ctxfeats, fmaps3d_detail, pms, points, masks, world_points, camera_poses = self.get_fmaps(images_, B, T, sw, is_training)
         
         fmaps = fmaps.to(dtype).reshape(B, T, C, H8, W8)
         fmaps3d_detail = fmaps3d_detail.to(dtype).reshape(B, T, self.flow3d_dim, H8, W8)
@@ -731,12 +1022,15 @@ class Holi4D(nn.Module):
         full_flows3d_list = [] if tracking3d else None
         points_list = []
         masks_list = []
+        world_points_list = []
+        camera_poses_list = []
         
         # Split points/masks (note: points/masks correspond to original B,T structure, need care if reshaped)
         # Here points has shape related to original images, splitting based on original B dimension
         points_chunks = list(torch.split(points, chunk_size, dim=0))
         masks_chunks = list(torch.split(masks, chunk_size, dim=0))
-
+        world_points_chunks = list(torch.split(world_points, chunk_size, dim=0))
+        camera_poses_chunks = list(torch.split(camera_poses, chunk_size, dim=0)) 
         for i in range(num_chunks):
             start_idx = i * chunk_size
             end_idx = min((i + 1) * chunk_size, B_pair)
@@ -754,7 +1048,9 @@ class Holi4D(nn.Module):
             # Assuming linear mapping for now based on context provided
             points_chunk = points_chunks[i] if i < len(points_chunks) else points_chunks[-1]
             masks_chunk = masks_chunks[i] if i < len(masks_chunks) else masks_chunks[-1]
-            
+            world_points_chunk = world_points_chunks[i] if i < len(world_points_chunks) else world_points_chunks[-1]
+            camera_poses_chunk = camera_poses_chunks[i] if i < len(camera_poses_chunks) else camera_poses_chunks[-1]
+
             # 2. Define Anchor (t=0) for the pair
             fmap_anchor_chunk = fmaps_chunk[:, 0]
             ctxfeat_anchor_chunk = ctxfeats_chunk[:, 0]
@@ -803,6 +1099,9 @@ class Holi4D(nn.Module):
             full_visconfs_list.append(chunk_visconf_preds[-1].detach().cpu())
             points_list.append(padder.unpad(points_chunk))
             masks_list.append(padder.unpad(masks_chunk))
+            world_points_list.append(padder.unpad(world_points_chunk))
+            camera_poses_list.append(camera_poses_chunk)
+            
 
             if tracking3d:
                 full_flows3d_list.append(chunk_flow3d_preds[-1].cpu())
@@ -846,10 +1145,12 @@ class Holi4D(nn.Module):
         
         points = torch.cat(points_list, dim=0)
         masks = torch.cat(masks_list, dim=0)
+        world_points = torch.cat(world_points_list, dim=0)
+        camera_poses = torch.cat(camera_poses_list, dim=0)
 
         if tracking3d:
             full_flows3d = torch.cat(full_flows3d_list, dim=0).reshape(B_pair, 3, H, W)
-            return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, full_flows3d, all_flow3d_preds, points, masks
+            return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, full_flows3d, all_flow3d_preds, points, masks, world_points, camera_poses
         else:
             return full_flows, full_visconfs, all_flow_preds, all_visconf_preds
 
@@ -885,7 +1186,7 @@ class Holi4D(nn.Module):
         
         # Feature Extraction or Retrieval from Cache
         if eval_dict is None:
-            fmaps, ctxfeats, fmaps3d_detail, pms, points, masks = self.get_fmaps(images_, B, T, sw, is_training)
+            fmaps, ctxfeats, fmaps3d_detail, pms, points, masks, world_points, camera_poses = self.get_fmaps(images_, B, T, sw, is_training)
             fmaps = fmaps.to(dtype).reshape(B, T, C, H8, W8)
             fmaps3d_detail = fmaps3d_detail.to(dtype).reshape(B, T, self.flow3d_dim, H8, W8)
             ctxfeats = ctxfeats.to(dtype).reshape(B, T, C1, H8, W8)
@@ -988,9 +1289,10 @@ class Holi4D(nn.Module):
             full_visconfs = all_visconf_preds[-1].reshape(B,2,H,W).detach().cpu()
             points = padder.unpad(points)
             masks = padder.unpad(masks)
-            
+            world_points = padder.unpad(world_points)
+
             if tracking3d:
-                return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, full_flows3d, all_flow3d_preds, points, masks, dict1
+                return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, full_flows3d, all_flow3d_preds, points, masks, dict1, world_points, camera_poses 
             else:
                 return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, dict1
 
@@ -1100,9 +1402,10 @@ class Holi4D(nn.Module):
         
         points = padder.unpad(points)    
         masks = padder.unpad(masks)    
-        
+        world_points = padder.unpad(world_points)    
+
         if tracking3d:
-            return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, full_flows3d, all_flow3d_preds, points, masks, dict1
+            return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, full_flows3d, all_flow3d_preds, points, masks, dict1, world_points, camera_poses 
         else:
             return full_flows, full_visconfs, all_flow_preds, all_visconf_preds, dict1
 
@@ -1275,9 +1578,10 @@ class Holi4D(nn.Module):
         H8, W8 = H_pad//8, W_pad//8
         C = self.flow_dim
         C1 = 128
-
-        fmaps_chunk_size = 64
-
+        if self.use_model in ['pi3', 'depthanythingv3']:
+            fmaps_chunk_size = 256
+        else:
+            fmaps_chunk_size = 64
         images = images_.reshape(B,T,3,H_pad,W_pad)
         fmaps = []
         fmaps3d_detail = []
@@ -1285,18 +1589,21 @@ class Holi4D(nn.Module):
         pms = []
         points = []
         masks = []
-        
+        world_points = []
+        camera_poses = []
         # Iterate through chunks of frames
         for t in range(0, T, fmaps_chunk_size):
             images_chunk = images[:, t : t + fmaps_chunk_size]
             # Extract features and geometry (points/masks)
-            fmaps_chunk, ctxfeats_chunk, fmaps3d_detail_chunk, pms_chunk, points_chunk, masks_chunk = self.forward_point(images_chunk, current_batch_size=B, for_flow=True)
+            fmaps_chunk, ctxfeats_chunk, fmaps3d_detail_chunk, pms_chunk, points_chunk, masks_chunk, world_points_chunk, camera_poses_chunk = self.forward_point(images_chunk, current_batch_size=B, for_flow=True)
             
             fmaps.append(fmaps_chunk.reshape(B, -1, C, H8, W8))
             ctxfeats.append(ctxfeats_chunk.reshape(B, -1, C1, H8, W8))
             pms.append(pms_chunk.reshape(B, -1, 3, H8, W8))
             points.append(points_chunk.reshape(B, -1, 3, H_pad, W_pad))
             masks.append(masks_chunk.reshape(B, -1, 1, H_pad, W_pad))
+            world_points.append(world_points_chunk.reshape(B, -1, 3, H_pad, W_pad))
+            camera_poses.append(camera_poses_chunk.reshape(B, -1, 4, 4))
             fmaps3d_detail.append(fmaps3d_detail_chunk.reshape(B, -1, self.flow3d_dim, H8, W8))
             
         # Concatenate all chunks
@@ -1306,7 +1613,9 @@ class Holi4D(nn.Module):
         pms = torch.cat(pms, dim=1).reshape(-1, 3, H8, W8)
         points = torch.cat(points, dim=1).reshape(-1, 3, H_pad, W_pad)
         masks = torch.cat(masks, dim=1).reshape(-1, 1, H_pad, W_pad)
-        return fmaps, ctxfeats, fmaps3d_detail, pms, points, masks
+        world_points = torch.cat(world_points, dim=1).reshape(-1, 3, H_pad, W_pad)
+        camera_poses = torch.cat(camera_poses, dim=1).reshape(-1, 4, 4)
+        return fmaps, ctxfeats, fmaps3d_detail, pms, points, masks, world_points, camera_poses
 
     def upsample_data(self, flow, mask, dim1):
         """
@@ -1612,7 +1921,7 @@ class Holi4D(nn.Module):
             - flow_3d: 3D scene flow.
         """
         # Run forward pass
-        flows_e, visconf_maps_e, _, _, flows3d_e, _, points, mask, _ = self.forward_sliding(
+        flows_e, visconf_maps_e, _, _, flows3d_e, _, points, mask, _, world_points, camera_poses = self.forward_sliding(
             images, iters=iters, sw=sw, is_training=is_training, tracking3d=tracking3d
         )
         B, T, C, H, W = images.shape
@@ -1631,9 +1940,10 @@ class Holi4D(nn.Module):
         return_dict = []
         points = points[None].permute(0, 1, 3, 4, 2)[:, :T]
         mask = mask[None].permute(0, 1, 3, 4, 2)[..., 0][:, :T]
+        world_points = world_points[None].permute(0, 1, 3, 4, 2)[:, :T]
         flow2d_c = flow2d.clone()
         flow2d_c = flow2d_c.permute(0, 1, 3, 4, 2)
-
+        
         with torch.autocast(device_type=self.device.type, dtype=torch.float32):
             points, mask = map(lambda x: x.float() if isinstance(x, torch.Tensor) else x, [points, mask])
             mask_binary = mask > self.mask_threshold
@@ -1654,9 +1964,10 @@ class Holi4D(nn.Module):
 
             if apply_mask:
                 points = torch.where(mask_binary[..., None], points, torch.inf)
+                world_points = torch.where(mask_binary[..., None], world_points, torch.inf)
                 depth = torch.where(mask_binary, depth, torch.inf)
 
-            return_dict.append({'points': points, 'intrinsics': intrinsics, 'depth': depth, 'mask': mask_binary})
+            return_dict.append({'points': points, 'intrinsics': intrinsics, 'depth': depth, 'mask': mask_binary, 'world_points': world_points, 'camera_poses': camera_poses})
             
             # Process 3D Flow / Forward Depth
             forward_depth = flow3d[..., 2] + shift[..., None, None, None].repeat(1, flow3d.shape[1], 1, 1)
@@ -1689,7 +2000,7 @@ class Holi4D(nn.Module):
         Evaluation method similar to infer but returns the eval_dict for caching features.
         Useful when evaluating on the same sequence multiple times.
         """
-        flows_e, visconf_maps_e, _, _, flows3d_e, _, points, mask, eval_dict = self.forward_sliding(
+        flows_e, visconf_maps_e, _, _, flows3d_e, _, points, mask, eval_dict, _, _ = self.forward_sliding(
             images, iters=iters, sw=sw, is_training=is_training, tracking3d=tracking3d, eval_dict=eval_dict
         )
         B, T, C, H, W = images.shape
@@ -1749,14 +2060,14 @@ class Holi4D(nn.Module):
     @torch.inference_mode()
     def infer_pair(self, images, iters=4, sw=None, is_training=False, window_len=None, stride=None, tracking3d=False, apply_mask: bool = False,
         force_projection: bool = True, use_fp16: bool = True, current_batch_size: int = 4,
-        local: bool = False, no_shift: bool = False,
+        local: bool = False, no_shift: bool = False, aligned_scene_flow: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """
         Inference optimized for pairwise estimation.
         Uses forward_sliding1 which implements memory optimization (chunking) for processing pairs.
         """
         # Run forward pass using the memory-optimized sliding window
-        flows_e, visconf_maps_e, _, _, flows3d_e, _, points, mask = self.forward_sliding1(
+        flows_e, visconf_maps_e, _, _, flows3d_e, _, points, mask, world_points, camera_poses = self.forward_sliding1(
             images, iters=iters, sw=sw, is_training=is_training, tracking3d=tracking3d
         )
         B, T, C, H, W = images.shape
@@ -1772,9 +2083,12 @@ class Holi4D(nn.Module):
         
         return_dict = []
         points = points[None].permute(0, 1, 3, 4, 2)[:, :T]
+        world_points = world_points[None].permute(0, 1, 3, 4, 2)[:, :T]
         mask = mask[None].permute(0, 1, 3, 4, 2)[..., 0][:, :T]
         flow2d_c = flow2d.clone()
         flow2d_c = flow2d_c.permute(0, 1, 3, 4, 2)
+        if aligned_scene_flow:
+            flow3d = get_aligned_scene_flow_temporal(flow2d_c, flow3d, points, visconf_maps_e.cuda().permute(0, 1, 3, 4, 2), mode='align_dir')
 
         with torch.autocast(device_type=self.device.type, dtype=torch.float32):
             points, mask = map(lambda x: x.float() if isinstance(x, torch.Tensor) else x, [points, mask])
@@ -1793,9 +2107,10 @@ class Holi4D(nn.Module):
 
             if apply_mask:
                 points = torch.where(mask_binary[..., None], points, torch.inf)
+                world_points = torch.where(mask_binary[..., None], world_points, torch.inf)
                 depth = torch.where(mask_binary, depth, torch.inf)
 
-            return_dict.append({'points': points, 'intrinsics': intrinsics, 'depth': depth, 'mask': mask_binary})
+            return_dict.append({'points': points, 'intrinsics': intrinsics, 'depth': depth, 'mask': mask_binary, 'world_points': world_points, 'camera_poses': camera_poses})
             
             forward_depth = flow3d[..., 2] + shift[..., None, None, None].repeat(1, flow3d.shape[1], 1, 1)
             
@@ -1819,4 +2134,3 @@ class Holi4D(nn.Module):
             })
 
         return return_dict
-

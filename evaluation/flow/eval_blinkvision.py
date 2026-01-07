@@ -422,13 +422,13 @@ def load_model(args: argparse.Namespace, config: Dict) -> torch.nn.Module:
     if args.ckpt_init and os.path.exists(args.ckpt_init):
         logger.info(f'Loading weights from local file: {args.ckpt_init}...')
         state_dict = torch.load(args.ckpt_init, map_location='cpu')
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     else:
         # Fallback to Hub download
         url = "https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth"
         logger.info(f'Local checkpoint not found. Downloading from {url}...')
         state_dict = torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
     
     model.cuda()
     model.eval()
@@ -454,7 +454,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ckpt_init",
         type=str,
-        default="/group/40075/jiahaolu/MoGe/alltracker/checkpoints/cleaned_model.pth",
+        default="./checkpoints/holi4d.pth",
         help="Path to model checkpoint file"
     )
 

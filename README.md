@@ -47,6 +47,14 @@ conda create -n holi4d python=3.11
 conda activate holi4d
 pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
+cd submodules/Grounded-SAM-2
+pip install -e .
+pip install --no-build-isolation -e grounding_dino
+cd ../..
+
+mkdir -p checkpoints
+wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -O ./checkpoints/sam2.1_hiera_large.pt
+wget https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth
 ```
 
 ### 3. Download Weights

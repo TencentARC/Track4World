@@ -1,1 +1,1 @@
-python visualization/vis_3d_efep.py --ply_dir results/cat/3d_efep_output
+/data/miniconda3/envs/holi4d/bin/python visualization/vis_3d_efep_world.py --ply_dir /group/40075/jiahaolu/cleaned_code/Holi4D/results/horsejump-high/3d_efep_output
