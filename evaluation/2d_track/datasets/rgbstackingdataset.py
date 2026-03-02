@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import pickle
 from datasets.pointdataset import PointDataset
-import holi4d.utils.data
+import track4world.utils.data
 import cv2
 
 class RGBStackingDataset(PointDataset):
@@ -65,7 +65,7 @@ class RGBStackingDataset(PointDataset):
         valids = valids.transpose(1, 0)
 
         # Standardize data format (temporal trimming, first-frame selection, etc.)
-        rgbs, trajs_rgb, visibs_, valids = holi4d.utils.data.standardize_test_data(
+        rgbs, trajs_rgb, visibs_, valids = track4world.utils.data.standardize_test_data(
             rgbs, trajs_rgb, visibs_, 
             valids, only_first=self.only_first,
             seq_len=self.seq_len
@@ -100,7 +100,7 @@ class RGBStackingDataset(PointDataset):
         valids = torch.from_numpy(valids).float()  # (S, N)
 
         # Package everything into a VideoData object
-        sample = holi4d.utils.data.VideoData(
+        sample = track4world.utils.data.VideoData(
             video=rgbs,
             trajs=trajs_rgb,
             visibs=visibs_,

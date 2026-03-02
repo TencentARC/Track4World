@@ -16,16 +16,16 @@ from tensorboardX import SummaryWriter
 # ==============================================================================
 # Path Setup
 # ==============================================================================
-# Add root directory to sys.path to allow imports from holi4d modules
-ROOT = Path(__file__).resolve().parents[2]  # Holi4D/
+# Add root directory to sys.path to allow imports from track4world modules
+ROOT = Path(__file__).resolve().parents[2]  # Track4World/
 sys.path.insert(0, str(ROOT))
 
-import holi4d.utils.data
-import holi4d.utils.basic
-import holi4d.utils.improc
-import holi4d.utils.misc
-from holi4d.nets.model import Holi4D
-
+import track4world.utils.data
+import track4world.utils.basic
+import track4world.utils.improc
+import track4world.utils.misc
+from track4world.nets.model import Track4World
+from demo import load_model
 # Optimize matrix multiplication precision for newer GPUs (Ampere+)
 torch.set_float32_matmul_precision('medium')
 
@@ -106,12 +106,12 @@ def create_pools(args, n_pool=10000, min_size=1):
     # Thresholds for distance metrics (1, 2, 4, 8, 16 pixels)
     thrs = [1, 2, 4, 8, 16]
     for thr in thrs:
-        pools[f'd_{thr}'] = holi4d.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
-        pools[f'jac_{thr}'] = holi4d.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
+        pools[f'd_{thr}'] = track4world.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
+        pools[f'jac_{thr}'] = track4world.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
         
-    pools['d_avg'] = holi4d.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
-    pools['aj'] = holi4d.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
-    pools['oa'] = holi4d.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
+    pools['d_avg'] = track4world.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
+    pools['aj'] = track4world.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
+    pools['oa'] = track4world.utils.misc.SimplePool(n_pool, version='np', min_size=min_size)
     return pools
 
 
@@ -125,7 +125,7 @@ def forward_batch(batch, model, args, sw):
     
     Args:
         batch: Data batch containing video, trajectories, visibility, etc.
-        model: The Holi4D model instance.
+        model: The Track4World model instance.
         args: Configuration arguments.
         sw: SummaryWriter wrapper for logging.
         
@@ -156,7 +156,7 @@ def forward_batch(batch, model, args, sw):
 
     # Create a 2D grid for coordinate reference
     # grid_xy: [1, 1, 2, H, W]
-    grid_xy = holi4d.utils.basic.gridcloud2d(1, H, W, norm=False, device=device).float()
+    grid_xy = track4world.utils.basic.gridcloud2d(1, H, W, norm=False, device=device).float()
     grid_xy = grid_xy.permute(0, 2, 1).reshape(1, 1, 2, H, W)
 
     # Initialize tensors for estimated trajectories and visibility confidence
@@ -168,78 +168,79 @@ def forward_batch(batch, model, args, sw):
     pre_first_positive_ind = 0
 
     with torch.no_grad():
-        # Iterate through unique starting frames (query frames)
-        # This handles points that appear at different times in the video
-        for first_positive_ind in torch.unique(first_positive_inds):
-            
-            # 1. Identify points starting at this specific frame
-            mask = (first_positive_inds[0] == first_positive_ind)
-
-            chunk_pt_idxs = torch.nonzero(mask, as_tuple=False)[:, 0]
-            
-            # Extract ground truth starting positions for these points
-            # chunk_pts: [B, K, 2] where K is number of points in this chunk
-            chunk_pts = trajs_g[:, first_positive_ind[None].repeat(chunk_pt_idxs.shape[0]), chunk_pt_idxs]
-            
-            # Store query points: [Frame_Index, X, Y]
-            query_points_all.append(torch.cat([first_positive_inds[:, chunk_pt_idxs, None], chunk_pts], dim=2))
-            
-            # Initialize maps for this chunk
-            traj_maps_e = grid_xy.repeat(1, T, 1, 1, 1) # [B, T, 2, H, W]
-            visconf_maps_e = torch.zeros_like(traj_maps_e)
-
-            # 2. Update evaluation dictionary (state) if continuing from previous chunks
-            if eval_dict is not None:
-                # Slice features to align with the current time window
-                offset = first_positive_ind - pre_first_positive_ind
-                for key in ['fmaps', 'ctxfeats', 'fmaps3d_detail', 'pms']:
-                    if key in eval_dict:
-                        eval_dict[key] = eval_dict[key][:, offset:]
-                for key in ['points', 'masks']:
-                    if key in eval_dict:
-                        eval_dict[key] = eval_dict[key][offset:]
-
-            # 3. Run Model Inference (Sliding Window)
-            if first_positive_ind < T - 1:
-                # forward_sliding handles long videos by processing in windows
-                forward_flow_e, forward_visconf_e, _, _, eval_dict = model.forward_sliding(
-                    rgbs[:, first_positive_ind:], 
-                    iters=args.inference_iters, 
-                    sw=sw, 
-                    is_training=False, 
-                    eval_dict=eval_dict
-                )
-
-                # Convert flow to absolute coordinates
-                forward_traj_maps_e = forward_flow_e.to(device) + grid_xy
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            # Iterate through unique starting frames (query frames)
+            # This handles points that appear at different times in the video
+            for first_positive_ind in torch.unique(first_positive_inds):
                 
-                # Update maps for the valid time range
-                traj_maps_e[:, first_positive_ind:] = forward_traj_maps_e
-                visconf_maps_e[:, first_positive_ind:] = forward_visconf_e
+                # 1. Identify points starting at this specific frame
+                mask = (first_positive_inds[0] == first_positive_ind)
 
-                # Clean up memory if not saving visualization
-                if not sw.save_this:
-                    del forward_flow_e, forward_visconf_e, forward_traj_maps_e
+                chunk_pt_idxs = torch.nonzero(mask, as_tuple=False)[:, 0]
+                
+                # Extract ground truth starting positions for these points
+                # chunk_pts: [B, K, 2] where K is number of points in this chunk
+                chunk_pts = trajs_g[:, first_positive_ind[None].repeat(chunk_pt_idxs.shape[0]), chunk_pt_idxs]
+                
+                # Store query points: [Frame_Index, X, Y]
+                query_points_all.append(torch.cat([first_positive_inds[:, chunk_pt_idxs, None], chunk_pts], dim=2))
+                
+                # Initialize maps for this chunk
+                traj_maps_e = grid_xy.repeat(1, T, 1, 1, 1) # [B, T, 2, H, W]
+                visconf_maps_e = torch.zeros_like(traj_maps_e)
 
-            pre_first_positive_ind = first_positive_ind    
+                # 2. Update evaluation dictionary (state) if continuing from previous chunks
+                if eval_dict is not None:
+                    # Slice features to align with the current time window
+                    offset = first_positive_ind - pre_first_positive_ind
+                    for key in ['fmaps', 'ctxfeats', 'fmaps3d_detail', 'pms']:
+                        if key in eval_dict:
+                            eval_dict[key] = eval_dict[key][:, offset:]
+                    for key in ['points', 'masks']:
+                        if key in eval_dict:
+                            eval_dict[key] = eval_dict[key][offset:]
 
-            # 4. Sample the dense flow maps at the query point locations
-            # Get starting coordinates (rounded to nearest integer for indexing)
-            xyt = trajs_g[:, first_positive_ind].round().long()[0, chunk_pt_idxs] # [K, 2]
-            
-            # Sample trajectories: [B, T, 2, K] -> [B, T, K, 2]
-            trajs_e_chunk = traj_maps_e[:, :, :, xyt[:, 1], xyt[:, 0]]
-            trajs_e_chunk = trajs_e_chunk.permute(0, 1, 3, 2)
-            
-            # Scatter results back into the main storage tensor
-            # We use scatter_add_ to place the K points into their correct indices N
-            scatter_idx = chunk_pt_idxs[None, None, :, None].repeat(1, trajs_e_chunk.shape[1], 1, 2)
-            trajs_e.scatter_add_(2, scatter_idx, trajs_e_chunk)
+                # 3. Run Model Inference (Sliding Window)
+                if first_positive_ind < T - 1:
+                    # forward_sliding handles long videos by processing in windows
+                    forward_flow_e, forward_visconf_e, _, _, eval_dict = model.forward_sliding(
+                        rgbs[:, first_positive_ind:], 
+                        iters=args.inference_iters, 
+                        sw=sw, 
+                        is_training=False, 
+                        eval_dict=eval_dict
+                    )
 
-            # Sample visibility confidence
-            visconfs_e_chunk = visconf_maps_e[:, :, :, xyt[:, 1], xyt[:, 0]]
-            visconfs_e_chunk = visconfs_e_chunk.permute(0, 1, 3, 2)
-            visconfs_e.scatter_add_(2, scatter_idx, visconfs_e_chunk)
+                    # Convert flow to absolute coordinates
+                    forward_traj_maps_e = forward_flow_e.to(device) + grid_xy
+                    
+                    # Update maps for the valid time range
+                    traj_maps_e[:, first_positive_ind:] = forward_traj_maps_e
+                    visconf_maps_e[:, first_positive_ind:] = forward_visconf_e
+
+                    # Clean up memory if not saving visualization
+                    if not sw.save_this:
+                        del forward_flow_e, forward_visconf_e, forward_traj_maps_e
+
+                pre_first_positive_ind = first_positive_ind    
+
+                # 4. Sample the dense flow maps at the query point locations
+                # Get starting coordinates (rounded to nearest integer for indexing)
+                xyt = trajs_g[:, first_positive_ind].round().long()[0, chunk_pt_idxs] # [K, 2]
+                
+                # Sample trajectories: [B, T, 2, K] -> [B, T, K, 2]
+                trajs_e_chunk = traj_maps_e[:, :, :, xyt[:, 1], xyt[:, 0]]
+                trajs_e_chunk = trajs_e_chunk.permute(0, 1, 3, 2)
+                
+                # Scatter results back into the main storage tensor
+                # We use scatter_add_ to place the K points into their correct indices N
+                scatter_idx = chunk_pt_idxs[None, None, :, None].repeat(1, trajs_e_chunk.shape[1], 1, 2)
+                trajs_e.scatter_add_(2, scatter_idx, trajs_e_chunk)
+
+                # Sample visibility confidence
+                visconfs_e_chunk = visconf_maps_e[:, :, :, xyt[:, 1], xyt[:, 0]]
+                visconfs_e_chunk = visconfs_e_chunk.permute(0, 1, 3, 2)
+                visconfs_e.scatter_add_(2, scatter_idx, visconfs_e_chunk)
 
     # Combine visibility confidence channels (if applicable)
     visconfs_e[..., 0] *= visconfs_e[..., 1]
@@ -257,7 +258,7 @@ def forward_batch(batch, model, args, sw):
     pred_occluded = (visconfs_e[..., 0] < vis_thr).bool().transpose(1, 2)
     pred_tracks = trajs_e.transpose(1, 2)
     
-    metrics = holi4d.utils.misc.compute_tapvid_metrics(
+    metrics = track4world.utils.misc.compute_tapvid_metrics(
         query_points=query_points_all.cpu().numpy(),
         gt_occluded=gt_occluded.cpu().numpy(),
         gt_tracks=gt_tracks.cpu().numpy(),
@@ -310,7 +311,7 @@ def run_evaluation(dname, model, args):
         generator=g,
         pin_memory=True,
         drop_last=True,
-        collate_fn=holi4d.utils.data.collate_fn_train,
+        collate_fn=track4world.utils.data.collate_fn_train,
     )
     
     print(f'Dataset: {dname}, Size: {len(dataloader)}')
@@ -346,7 +347,7 @@ def run_evaluation(dname, model, args):
             continue
         
         # Setup summary writer for this step
-        sw_t = holi4d.utils.improc.SummWriter(
+        sw_t = track4world.utils.improc.SummWriter(
             writer=writer_t,
             global_step=global_step,
             log_freq=args.log_freq,
@@ -407,42 +408,6 @@ def run_evaluation(dname, model, args):
         overpools_t['oa'].mean() * 100.0
     )
 
-
-# ==============================================================================
-# Model Loading
-# ==============================================================================
-
-def load_model(args: argparse.Namespace, config) -> torch.nn.Module:
-    """
-    Initializes the Holi4D model and loads pretrained weights.
-    """
-    print("Initializing Holi4D model...")
-    model = Holi4D(
-        **config['model'],
-        seqlen=16,
-        use_3d=True,
-    )
-
-    if args.ckpt_init and os.path.exists(args.ckpt_init):
-        print(f"Loading checkpoint from: {args.ckpt_init}")
-        state_dict = torch.load(args.ckpt_init, map_location='cpu')
-        model.load_state_dict(state_dict, strict=False)
-    else:
-        print("Checkpoint not found locally. Downloading from HuggingFace Hub...")
-        url = "https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth"
-        state_dict = torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
-        model.load_state_dict(state_dict, strict=False)
-    
-    model.cuda()
-    model.eval()
-    
-    # Freeze parameters for evaluation
-    for p in model.parameters():
-        p.requires_grad = False
-    
-    return model
-
-
 # ==============================================================================
 # Main Execution
 # ==============================================================================
@@ -451,10 +416,10 @@ if __name__ == "__main__":
     torch.set_grad_enabled(False)
     
     # Argument Parsing
-    parser = argparse.ArgumentParser(description="Holi4D Evaluation Script")
+    parser = argparse.ArgumentParser(description="Track4World Evaluation Script")
     
     # Experiment & Data
-    parser.add_argument("--dname", type=str, nargs='+', default=None, 
+    parser.add_argument("--dname", type=str, nargs='+', default=['kin'], 
                         help="Dataset names (e.g., 'kin', 'rgb', 'rob')")
     parser.add_argument("--dataset_root", type=str, 
                         default='./evaluation/2d_track',
@@ -462,11 +427,21 @@ if __name__ == "__main__":
     
     # Model & Checkpoint
     parser.add_argument("--ckpt_init", type=str, 
-                        default="./checkpoints/holi4d.pth",
+                        default="./checkpoints/track4world_da3.pth",
                         help="Path to model checkpoint file")
-    parser.add_argument("--config_path", type=str, default="./holi4d/config/eval/v1.json",
+    parser.add_argument("--coordinate", type=str, 
+        default='world_depthanythingv3', 
+        choices=['camera_base', 'world_pi3', 'world_depthanythingv3'],
+        help="'camera': camera centric, 'world': world centric"
+    )
+    parser.add_argument(
+        "--use_original_backbone",
+        action="store_true",
+        help="Use the original pretrained backbone instead of the modified one."
+    )
+    parser.add_argument("--config_path", type=str, default="./track4world/config/eval/v1.json",
                         help="Path to model configuration JSON file")
-    parser.add_argument("--model_type", type=str, default="Holi4D", help="Model type name for logging")
+    parser.add_argument("--model_type", type=str, default="Track4World", help="Model type name for logging")
 
     # Inference Parameters
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size (must be 1)")
@@ -487,7 +462,7 @@ if __name__ == "__main__":
     if args.dname is not None and len(args.dname) == 1 and ',' in args.dname[0]:
         args.dname = args.dname[0].split(',')
     if args.dname is None:
-        args.dname = ['kin', 'rgb', 'rob']
+        args.dname = ['rgb', 'rob', 'kin']
     
     dataset_names = args.dname
     args.image_size = [int(args.image_size[0]), int(args.image_size[1])]

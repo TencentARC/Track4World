@@ -5,7 +5,7 @@ import imageio
 import numpy as np
 from torchvision.transforms import ColorJitter, GaussianBlur
 from PIL import Image
-import holi4d.utils.data
+import track4world.utils.data
 
 class PointDataset(torch.utils.data.Dataset):
     """
@@ -81,7 +81,7 @@ class PointDataset(torch.utils.data.Dataset):
 
         # Fallback: return a zero-filled sample if all retries fail
         S = self.seq_len if self.seq_len is not None else 11
-        sample = holi4d.utils.data.VideoData(
+        sample = track4world.utils.data.VideoData(
             video=torch.zeros((S, 3, self.crop_size[0], self.crop_size[1])),
             trajs=torch.zeros((S, self.traj_per_sample, 2)),
             visibs=torch.zeros((S, self.traj_per_sample)),

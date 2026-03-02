@@ -19,11 +19,11 @@ from PIL import Image
 import imageio.v2 as imageio 
 
 # Add project root to path
-ROOT = Path(__file__).resolve().parents[2]  # Holi4D/
+ROOT = Path(__file__).resolve().parents[2]  # Track4World/
 sys.path.insert(0, str(ROOT))
 
 # Custom Project Imports
-from holi4d.nets.model import Holi4D
+from track4world.nets.model import Track4World
 from demo import load_model
 
 # ==============================================================================
@@ -134,9 +134,8 @@ def read_images_or_video(
                 scale = resize_to / min(h, w)
                 w_new, h_new = int(w * scale), int(h * scale)
                 frame = cv2.resize(frame, (w_new, h_new), cv2.INTER_AREA)
-
             video.append(frame)
-            image_tensor = torch.tensor(frame / 255.0, dtype=torch.float32, device=device).permute(2, 0, 1)
+            image_tensor = torch.tensor(frame, dtype=torch.float32, device=device).permute(2, 0, 1)
             video_list.append(image_tensor)
 
         cap.release()
@@ -320,12 +319,12 @@ def get_shared_args():
     """
     Defines the superset of arguments required for both tasks.
     """
-    parser = argparse.ArgumentParser(description="Holi4D Inference and Evaluation Script")
+    parser = argparse.ArgumentParser(description="Track4World Inference and Evaluation Script")
 
     # --- Model & Environment ---
-    parser.add_argument("--ckpt_init", type=str, default="./checkpoints/holi4d.pth", 
+    parser.add_argument("--ckpt_init", type=str, default="./checkpoints/track4world_da3.pth", 
                         help="Path to pretrained model checkpoint")
-    parser.add_argument("--config_path", type=str, default="./holi4d/config/eval/v1.json",
+    parser.add_argument("--config_path", type=str, default="./track4world/config/eval/v1.json",
                         help="Path to model config JSON")
     parser.add_argument("--output", "-o", dest="output_path", type=str, default='./output_eval', 
                         help="Output directory")
@@ -353,8 +352,13 @@ def get_shared_args():
                         help="Explicit token count")
     parser.add_argument("--max-depth", type=float, default=70.0, 
                         help="Max depth threshold for metrics")
-    parser.add_argument("--coordinate", type=str, default='camera_base', 
+    parser.add_argument("--coordinate", type=str, default='world_depthanythingv3', 
                         choices=['camera_base', 'world_pi3', 'world_depthanythingv3'])
+    parser.add_argument(
+        "--use_original_backbone",
+        action="store_true",
+        help="Use the original pretrained backbone instead of the modified one."
+    )
     parser.add_argument("--chunk_size", type=int, default=130,
                         help="Temporal chunk size")
 

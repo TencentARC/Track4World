@@ -1,7 +1,3 @@
-Here is the updated and polished **Evaluation** section. I have integrated the **2D tracking** instructions, fixed the section numbering, and ensured the directory structure matches your requirements.
-
----
-
 ## 📊 Evaluation
 
 To reproduce the results reported in our paper, please follow the steps below.
@@ -11,7 +7,7 @@ To reproduce the results reported in our paper, please follow the steps below.
 **Step 1: General Evaluation Datasets**
 Download the main evaluation datasets and unzip them into the project directory.
 
-[**📥 Download Evaluation Datasets**](https://huggingface.co/cyun9286/holi4d/blob/main/evaluation_datasets.zip)
+[**📥 Download Evaluation Datasets**](https://huggingface.co/TencentARC/Track4World/tree/main/evaluation_datasets.zip)
 
 **Step 2: 2D Tracking Datasets (TAP-Vid)**
 For 2D tracking benchmarks, please refer to the [**DeepMind TAP-Vid repository**](https://github.com/google-deepmind/tapnet/tree/main/tapnet/tapvid) for instructions on downloading and processing the data (`kinetics`, `rgb_stacking`, `robotap`).
@@ -20,7 +16,7 @@ For 2D tracking benchmarks, please refer to the [**DeepMind TAP-Vid repository**
 Ensure your directory structure matches the following layout after extraction and processing:
 
 ```text
-Holi4D/
+Track4World/
 └── evaluation/
     ├── 2d_track/                # 2D Tracking (TAP-Vid)
     │   ├── robotap/
@@ -54,6 +50,7 @@ Holi4D/
 Run the following commands to evaluate flow estimation on different datasets:
 
 **BlinkVision & KITTI:**
+
 ```bash
 python evaluation/flow/eval.py --dataset kitti
 python evaluation/flow/eval.py --dataset blinkvision
@@ -61,6 +58,7 @@ python evaluation/flow/eval.py --dataset blinkvision
 
 **Kubric:**
 Evaluate on different sequence lengths:
+
 ```bash
 python evaluation/flow/eval.py --dataset kubric_short
 python evaluation/flow/eval.py --dataset kubric_long
@@ -73,24 +71,28 @@ python evaluation/flow/eval.py --dataset kubric_long
 We provide separate scripts for evaluating point cloud reconstruction and video depth estimation.
 
 #### Point Cloud Evaluation
+
 ```bash
 python evaluation/point_cloud/eval_pointcloud.py \
-  --output evaluation/point_cloud/output/Sintel-3D_point \
+  --output evaluation/point_cloud/output/point/Sintel \
   --num_tokens 1200 \
   --gt-dataset-type Sintel
 ```
-*   **Supported Datasets (`--gt-dataset-type`):**
-    `Tum`, `Sintel`, `Scannet`, `Monkaa`, `Kubric-3D`, `KITTI`, `GMUKitchens`
+
+* **Supported Datasets (`--gt-dataset-type`):**
+  `Tum`, `Sintel`, `Scannet`, `Monkaa`, `Kubric-3D`, `KITTI`, `GMUKitchens`
 
 #### Video Depth Evaluation
+
 ```bash
 python evaluation/point_cloud/eval_videodepth.py \
-  --output evaluation/point_cloud/output/Sintel-3D_depth \
+  --output evaluation/point_cloud/output/depth/Sintel \
   --num_tokens 1200 \
   --gt-dataset-type Sintel
 ```
-*   **Supported Datasets (`--gt-dataset-type`):**
-    `Bonn`, `Sintel`, `Scannet`, `Monkaa`, `Kubric-3D`, `KITTI`, `GMUKitchens`
+
+* **Supported Datasets (`--gt-dataset-type`):**
+  `Bonn`, `Sintel`, `Scannet`, `Monkaa`, `Kubric-3D`, `KITTI`, `GMUKitchens`
 
 ---
 
@@ -101,12 +103,15 @@ Evaluate 3D tracking performance by specifying the dataset and the number of fra
 ```bash
 python evaluation/track/eval.py \
   --dataset adt \
-  --num_frames 16
+  --num_frames 16 \
+  --world_eval
 ```
 
 **Arguments:**
-*   `--dataset`: Choose from `['adt', 'ds', 'po', 'pstudio']`
-*   `--num_frames`: Choose from `[16, 50]`
+
+* `--dataset`: Choose from `['adt', 'ds', 'po', 'pstudio']`
+* `--num_frames`: Choose from `[16, 50]`
+* `--world_eval`: Evaluate results in the world coordinate system
 
 ---
 

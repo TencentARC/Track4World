@@ -8,9 +8,7 @@ import torch
 import matplotlib.pyplot as plt
 import open3d as o3d
 import viser
-import viser.transforms as tf
 from tqdm.auto import tqdm
-
 # Try importing faiss for GPU acceleration, fallback if not available
 try:
     import faiss
@@ -27,6 +25,197 @@ MAX_DISPLACEMENT = 1.0
 # ==============================================================================
 # Helper Functions
 # ==============================================================================
+def process_trajectories(
+    trajectories_3d, 
+    visibility_mask, 
+    traj_dyn_mask_raw, 
+    k_consecutive=5, 
+    jump_threshold=0.6, 
+    acc_threshold=0.5,   # Acceleration threshold for filtering jittery trajectories
+    smooth_sigma=1.5     # Smoothing parameter (reserved for optional post-processing)
+):
+    """
+    Filter unstable 3D trajectories based on visibility continuity, motion jumps,
+    and smoothness constraints, and optionally prepare them for smoothing.
+
+    Args:
+        trajectories_3d (np.ndarray): 3D trajectories of shape (T, N, 3),
+            where T is the number of frames and N is the number of trajectories.
+        visibility_mask (np.ndarray): Boolean visibility mask of shape (T, N),
+            indicating whether each trajectory is visible at each frame.
+        traj_dyn_mask_raw (np.ndarray): Raw dynamic/static mask associated with
+            each trajectory, shape (T, N).
+        k_consecutive (int): Minimum number of consecutive visible frames required
+            to keep a trajectory.
+        jump_threshold (float): Velocity magnitude threshold for detecting sudden
+            motion jumps.
+        acc_threshold (float): Acceleration magnitude threshold for detecting
+            jittery or non-smooth trajectories.
+        smooth_sigma (float): Standard deviation for optional Gaussian smoothing
+            (currently not applied).
+
+    Returns:
+        trajectories_3d (np.ndarray): Filtered 3D trajectories.
+        visibility_mask (np.ndarray): Corresponding filtered visibility mask.
+        traj_dyn_mask_raw (np.ndarray): Corresponding filtered dynamic mask.
+    """
+    T, N, _ = trajectories_3d.shape
+
+    # ==========================================================
+    # 1. Consecutive Visibility Filtering
+    # ==========================================================
+    mask_int = visibility_mask.astype(np.int32)
+
+    # Use cumulative sum to efficiently compute the number of visible frames
+    # within a sliding window of length k_consecutive
+    cumsum_mask = np.cumsum(
+        np.vstack([np.zeros((1, N)), mask_int]), axis=0
+    )
+    window_sums = cumsum_mask[k_consecutive:] - cumsum_mask[:-k_consecutive]
+    # A trajectory is valid if there exists at least one window where all
+    # k_consecutive frames are visible
+    valid_length_mask = np.any(window_sums == k_consecutive, axis=0)
+
+    # ==========================================================
+    # 2. Motion Jump Filtering (Velocity Check)
+    # ==========================================================
+    # First-order temporal difference as a proxy for velocity
+    # The factor 100 is kept from the original implementation
+    # (assumed to be a unit scaling)
+    velocities = 100 * (trajectories_3d[1:] - trajectories_3d[:-1])
+    vel_norms = np.linalg.norm(velocities, axis=2)
+
+    # Only check velocity jumps when the trajectory is visible
+    # in both consecutive frames
+    valid_consecutive_frames = visibility_mask[1:] & visibility_mask[:-1]
+
+    # A trajectory is considered to have jumps if any velocity magnitude
+    # exceeds the threshold in visible regions
+    has_jumps = np.any(
+        (vel_norms > jump_threshold) & valid_consecutive_frames,
+        axis=0
+    )
+
+    # ==========================================================
+    # 3. Smoothness / Jitter Filtering (Acceleration Check)
+    # ==========================================================
+    # Second-order temporal difference as a proxy for acceleration
+    accelerations = velocities[1:] - velocities[:-1]
+    acc_norms = np.linalg.norm(accelerations, axis=2)
+
+    # Only evaluate acceleration when the trajectory is visible
+    # for three consecutive frames
+    valid_acc_frames = (
+        visibility_mask[2:] &
+        visibility_mask[1:-1] &
+        visibility_mask[:-2]
+    )
+
+    # Debug: report maximum acceleration observed in valid regions
+    print(acc_norms[valid_acc_frames].max())
+
+    # A trajectory is considered jittery if any acceleration magnitude
+    # exceeds the threshold in valid regions
+    is_jittery = np.any(
+        (acc_norms > acc_threshold) & valid_acc_frames,
+        axis=0
+    )
+
+    # ==========================================================
+    # 4. Final Filtering and Application
+    # ==========================================================
+    # Keep trajectories that satisfy all conditions:
+    # sufficient visibility length, no large jumps, and smooth motion
+    final_keep_mask = (
+        valid_length_mask &
+        (~has_jumps) &
+        (~is_jittery)
+    )
+
+    if not np.any(final_keep_mask):
+        print("Warning: No trajectories survived filtering.")
+        return (
+            trajectories_3d[:, []],
+            visibility_mask[:, []],
+            traj_dyn_mask_raw[:, []]
+        )
+
+    # Apply the final mask
+    trajectories_3d = trajectories_3d[:, final_keep_mask]
+    visibility_mask = visibility_mask[:, final_keep_mask]
+    traj_dyn_mask_raw = traj_dyn_mask_raw[:, final_keep_mask]
+
+    # Optional post-smoothing (currently disabled)
+    # trajectories_3d = gaussian_filter1d(
+    #     trajectories_3d, sigma=smooth_sigma, axis=0
+    # )
+
+    return trajectories_3d, visibility_mask, traj_dyn_mask_raw
+
+def fill_trajectory_gaps(trajectories, mask, max_gap=3):
+    """
+    Linearly interpolate short missing segments in trajectories.
+
+    This function fills short temporal gaps (up to `max_gap` frames)
+    in object trajectories caused by occlusions, tracking failures,
+    or detection flickering.
+
+    Args:
+        trajectories (np.ndarray):
+            Trajectory array of shape (T, N, D), where:
+            - T is the number of frames,
+            - N is the number of trajectories,
+            - D is the spatial dimension (e.g., 2D or 3D coordinates).
+
+        mask (np.ndarray):
+            Boolean visibility mask of shape (T, N), where True indicates
+            the trajectory is valid/visible at the corresponding frame.
+
+        max_gap (int):
+            Maximum allowed length (in frames) of a missing segment to be
+            filled by linear interpolation. Longer gaps are ignored.
+
+    Returns:
+        filled_trajectories (np.ndarray):
+            Trajectory array with short gaps filled via linear interpolation.
+
+        filled_mask (np.ndarray):
+            Updated visibility mask with interpolated frames marked as visible.
+    """
+    T, N, _ = trajectories.shape
+    filled_trajectories = trajectories.copy()
+    filled_mask = mask.copy()
+
+    for i in tqdm(range(N), desc="Filling gaps"):
+        # Indices of frames where the current trajectory is visible
+        valid_indices = np.where(mask[:, i])[0]
+        
+        # Skip trajectories with fewer than two valid observations
+        if len(valid_indices) < 2:
+            continue
+
+        # Temporal differences between consecutive valid frames
+        diffs = valid_indices[1:] - valid_indices[:-1]
+        
+        # Identify short gaps: missing frames between two valid observations
+        # whose length does not exceed `max_gap`
+        gap_indices = np.where((diffs > 1) & (diffs <= max_gap + 1))[0]
+
+        for gap_idx in gap_indices:
+            start_t = valid_indices[gap_idx]
+            end_t = valid_indices[gap_idx + 1]
+            
+            # Start and end positions of the gap
+            p_start = filled_trajectories[start_t, i]
+            p_end = filled_trajectories[end_t, i]
+
+            # Linearly interpolate intermediate frames
+            for t in range(start_t + 1, end_t):
+                alpha = (t - start_t) / (end_t - start_t)
+                filled_trajectories[t, i] = (1 - alpha) * p_start + alpha * p_end
+                filled_mask[t, i] = True  # Mark interpolated frames as visible
+
+    return filled_trajectories, filled_mask
 
 def remove_radius_outlier_gpu(points: np.ndarray, 
     nb_points: int = 40, 
@@ -222,7 +411,11 @@ def main(
     # Apply initial downsampling
     trajectories_3d = trajectories_3d[:, ::DEFAULT_POINT_DOWNSAMPLE_RATE]
     visibility_mask = visibility_mask[:, ::DEFAULT_POINT_DOWNSAMPLE_RATE]
-
+    trajectories_3d, visibility_mask = fill_trajectory_gaps(
+        trajectories_3d, 
+        visibility_mask, 
+        max_gap=5  
+    )
     T, N, _ = trajectories_3d.shape
 
     # --- Compute Trajectory Colors ---

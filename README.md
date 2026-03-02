@@ -1,4 +1,4 @@
-# **Holi4D: Holistic Feedforward 4D Motion Reconstruction of All Pixels from Monocular Videos**
+# **Track4World: Feedforward World-centric Dense 3D Tracking of All Pixels**
 
 <div align="center">
 
@@ -8,25 +8,21 @@
 
 **Authors**
 `<br>`
-[Jiahao Lu](https://github.com/jiah-cloud)`<sup>`1`</sup>` &nbsp;•&nbsp; [Jiayi Xu](https://openreview.net/profile?id=~Jiayi_Xu10)`<sup>`1`</sup>` &nbsp;•&nbsp; [Wenbo Hu](https://wbhu.github.io/)`<sup>`2&dagger;`</sup>` &nbsp;•&nbsp; [Ruijie Zhu](https://ruijiezhu94.github.io/ruijiezhu/)`<sup>`2`</sup>`
+[Jiahao Lu](https://github.com/jiah-cloud)`<sup>`1`</sup>`  •  [Jiayi Xu](https://openreview.net/profile?id=~Jiayi_Xu10)`<sup>`1`</sup>`  •  [Wenbo Hu](https://wbhu.github.io/)`<sup>`2†`</sup>`  •  [Ruijie Zhu](https://ruijiezhu94.github.io/ruijiezhu/)`<sup>`2`</sup>`  •  [Chengfeng Zhao](https://afterjourney00.github.io/)`<sup>`1`</sup>`
 `<br>`
-[Sai-Kit Yeung](https://saikit.org/index.html)`<sup>`1`</sup>` &nbsp;•&nbsp; [Ying Shan](https://scholar.google.com/citations?user=4oXBp9UAAAAJ&hl=en)`<sup>`2`</sup>` &nbsp;•&nbsp; [Yuan Liu](https://liuyuan-pal.github.io/)`<sup>`1&dagger;`</sup>`
+[Sai-Kit Yeung](https://saikit.org/index.html)`<sup>`1`</sup>`  •  [Ying Shan](https://scholar.google.com/citations?user=4oXBp9UAAAAJ&hl=en)`<sup>`2`</sup>`  •  [Yuan Liu](https://liuyuan-pal.github.io/)`<sup>`1†`</sup>`
 
 </div>
 
 ---
 
-### 📖 Abstract
-
-**Holi4D** is a foundation 4D motion model that enables holistic 4D reconstruction from arbitrary monocular videos. Given a single video input of a dynamic scene, Holi4D predicts 3D points and scene flows for **all pixels** in a feedforward manner. This capability supports a variety of downstream tasks, including dense tracking and camera pose estimation.
-
----
-
-### 🖼️ Teaser
+### 🖼️ Framework
 
 <div align="center">
-  <img src="assets/teaser.png" width="100%" alt="Holi4D Teaser">
+  <img src="assets/framework.png" width="100%" alt="Track4World Teaser">
 </div>
+
+**Track4World** estimates dense 3D scene flow of every pixel between arbitrary frame pairs from a monocular video in a global feedforward manner, enabling efficient and dense 3D tracking of every pixel in the world-centric coordinate system.
 
 ---
 
@@ -37,8 +33,8 @@
 Clone the repository with submodules to ensure all dependencies are included:
 
 ```bash
-git clone --recursive https://github.com/TencentARC/Holi4D.git
-cd Holi4D
+git clone --recursive https://github.com/TencentARC/Track4World.git
+cd Track4World
 ```
 
 ### 2. Environment Setup
@@ -46,14 +42,28 @@ cd Holi4D
 We provide an installation script tested with **CUDA 12.1** and **Python 3.11**.
 
 ```bash
-conda create -n holi4d python=3.11
-conda activate holi4d
-pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt
+# Create and activate environment
+conda create -n track4world python=3.11
+conda activate track4world
 
+# Install PyTorch
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### 3. Install Third-Party Modules
+
+We utilize several external repositories. Please run the following commands to set them up correctly:
+
+```bash
+# Install utils3d
 git clone https://github.com/jiah-cloud/utils3d.git 
-git clone --no-checkout https://github.com/yyfz/Pi3.git holi4d/nets/external/pi3_repo
-cd holi4d/nets/external/pi3_repo
+
+# Setup Pi3 (Sparse checkout)
+git clone --no-checkout https://github.com/yyfz/Pi3.git track4world/nets/external/pi3_repo
+cd track4world/nets/external/pi3_repo
 git sparse-checkout init
 git sparse-checkout set pi3
 git checkout main
@@ -61,31 +71,31 @@ find . -maxdepth 1 -type f -exec rm -f {} \;
 mv pi3 ../pi3
 cd ../../../..
 
-git clone --no-checkout https://github.com/ByteDance-Seed/Depth-Anything-3.git holi4d/nets/external/dad3_repo
-cd holi4d/nets/external/dad3_repo
-git sparse-checkout init
-git sparse-checkout set src/depth_anything_3
-git checkout main
-find . -maxdepth 1 -type f -exec rm -f {} \;
-mv src/depth_anything_3 ../depth_anything_3
-cd ../../../..
-
+# Setup Grounded-SAM-2
 git clone https://github.com/IDEA-Research/Grounded-SAM-2.git submodules
 cd submodules
 pip install -e .
 pip install --no-build-isolation -e grounding_dino
 cd ..
-
-mkdir -p checkpoints
-wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -O ./checkpoints/sam2.1_hiera_large.pt
-wget https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth
 ```
 
-### 3. Download Weights
+### 4. Download Weights
 
-Download the pre-trained model weights and place them in the project root (or your preferred checkpoint directory).
+Download the pre-trained model weights and place them in the `checkpoints/` directory.
 
-* **Holi4D Weights:** [Download from HuggingFace](https://huggingface.co/cyun9286/holi4d/blob/main/holi4d.pth)
+```bash
+mkdir -p checkpoints
+
+# Download SAM2 weights
+wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt -O ./checkpoints/sam2.1_hiera_large.pt
+
+# Download Track4World weights
+wget https://huggingface.co/TencentARC/Track4World/resolve/main/track4world_da3.pth -O ./checkpoints/track4world_da3.pth
+wget https://huggingface.co/TencentARC/Track4World/resolve/main/track4world_pi3.pth -O ./checkpoints/track4world_pi3.pth
+wget https://huggingface.co/TencentARC/Track4World/resolve/main/track4world_moge.pth -O ./checkpoints/track4world_moge.pth
+```
+
+* **Manual Download:** [HuggingFace Link](https://huggingface.co/TencentARC/Track4World)
 
 ---
 
@@ -95,7 +105,7 @@ Run the following commands to perform tracking and reconstruction on the provide
 
 ### 1. First Frame 3D Tracking (`3d_ff`)
 
-Reconstructs 3D motion based on the first frame.
+Reconstructs 3D motion based on the geometry of the first frame.
 
 ```bash
 python demo.py \
@@ -109,11 +119,37 @@ python demo.py \
 
 Performs dense 3D tracking for every pixel across all frames.
 
+**Option A: Camera-Centric Coordinate System**
 ```bash
 python demo.py \
     --mp4_path demo_data/cat.mp4 \
+    --coordinate world_depthanythingv3 \
     --mode 3d_efep \
     --Ts -1 \
+    --ckpt_init checkpoints/track4world_da3.pth \
+    --save_base_dir results/cat
+```
+
+**Option B: World-Centric Coordinate System**
+
+For world-centric reconstruction, you can also directly run **Step 2** to obtain world-centric 3D tracking results. However, for better visualization, especially to clearly separate foreground and background objects,it is recommended to first segment dynamic objects using DINO and SAM2 in **Step 1**. You can use either `world_depthanythingv3` or `world_pi3` for world coordinate system.
+
+```bash
+# 1. DINO + SAM2 Segmentation
+# Use --text-prompt to specify the dynamic objects in your video (e.g., "cat.", "person.", "car.").
+python scripts/run_dino_sam2.py \
+    --video-path demo_data/cat.mp4 \
+    --sam2-checkpoint checkpoints/sam2.1_hiera_large.pt \
+    --output-dir results/cat \
+    --text-prompt "cat."
+    
+# 2. Run Track4World 3D EFEP
+python demo.py \
+    --mp4_path demo_data/cat.mp4 \
+    --coordinate world_depthanythingv3 \
+    --mode 3d_efep \
+    --Ts -1 \
+    --ckpt_init checkpoints/track4world_da3.pth \
     --save_base_dir results/cat
 ```
 
@@ -144,7 +180,11 @@ python visualization/vis_3d_ff.py --ply_dir results/cat/3d_ff_output
 **Visualize Dense Tracking (Every Pixel):**
 
 ```bash
+# Camera Centric Visualization
 python visualization/vis_3d_efep.py --ply_dir results/cat/3d_efep_output
+
+# World Centric Visualization (Foreground-Background Separation, Static Background)
+python visualization/vis_3d_efep_world.py --ply_dir results/cat/3d_efep_output
 ```
 
 <div align="center">
@@ -163,7 +203,7 @@ For detailed instructions on how to evaluate the model on standard benchmarks (S
 
 ## 📝 Citation
 
-If you find **Holi4D** useful for your research or applications, please consider citing our paper:
+If you find **Track4World** useful for your research or applications, please consider citing our paper:
 
 ```bibtex
 
@@ -173,4 +213,4 @@ If you find **Holi4D** useful for your research or applications, please consider
 
 ## 🤝 Acknowledgements
 
-Our codebase is built upon [MoGe](https://github.com/microsoft/MoGe) and [Alltracker](https://github.com/aharley/alltrackerh). We also gratefully acknowledge [Trackingworld](https://github.com/IGL-HKUST/TrackingWorld), [VGGT](https://github.com/facebookresearch/vggt) for their excellent work!
+Our codebase is built upon [MoGe](https://github.com/microsoft/MoGe), [Alltracker](https://github.com/aharley/alltrackerh), [Pi3](https://github.com/yyfz/Pi3), and [Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3). We also gratefully acknowledge [TrackingWorld](https://github.com/IGL-HKUST/TrackingWorld) and [VGGT](https://github.com/facebookresearch/vggt) for their excellent work!

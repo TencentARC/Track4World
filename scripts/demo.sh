@@ -1,34 +1,31 @@
 #!/bin/bash
-
 # ============================================================
 # Unified Path Settings
 # ============================================================
 
-VIDEO="/group/40075/jiahaolu/cleaned_code/Holi4D/demo_data/snowboard.mp4"
-OUTPUT_DIR="results/snowboard"
-SAM2_CKPT="/group/40075/jiahaolu/cleaned_code/DELTA_densetrack3d/checkpoints/sam2.1_hiera_large.pt"
-HOLI4D_CKPT="/group/40075/jiahaolu/MoGe/alltracker/checkpoints/cleaned_model.pth"
+VIDEO="demo_data/cat.mp4"
+OUTPUT_DIR="results/cat"
+SAM2_CKPT="checkpoints/sam2.1_hiera_large.pt"
+TRACK4WORLD_CKPT="checkpoints/track4world_pi3.pth"
 
 # ============================================================
 # 1️⃣ DINO + SAM2 Segmentation
 # ============================================================
 
-# CUDA_VISIBLE_DEVICES=1 \
-# /data/miniconda3/envs/holi4d/bin/python scripts/run_dino_sam2.py \
-#     --video-path "$VIDEO" \
-#     --sam2-checkpoint "$SAM2_CKPT" \
-#     --output-dir "$OUTPUT_DIR" \
-#     --text-prompt "car, black car."
+python scripts/run_dino_sam2.py \
+    --video-path "$VIDEO" \
+    --sam2-checkpoint "$SAM2_CKPT" \
+    --output-dir "$OUTPUT_DIR" \
+    --text-prompt "cat."
 
 # ============================================================
-# 2️⃣ Holi4D 3D EFEP Demo
+# 2️⃣ Track4World 3D EFEP Demo
 # ============================================================
 
-CUDA_VISIBLE_DEVICES=1 \
-/data/miniconda3/envs/holi4d/bin/python demo.py \
+python demo.py \
     --mp4_path "$VIDEO" \
+    --coordinate world_pi3 \
     --mode 3d_efep \
-    --coordinate world_depthanythingv3 \
     --Ts -1 \
-    --ckpt_init "$HOLI4D_CKPT" \
+    --ckpt_init "$TRACK4WORLD_CKPT" \
     --save_base_dir "$OUTPUT_DIR"

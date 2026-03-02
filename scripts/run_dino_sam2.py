@@ -37,8 +37,8 @@ parser.add_argument("--sam2-checkpoint", default="./checkpoints/sam2.1_hiera_lar
 parser.add_argument("--sam2-model-config", default="configs/sam2.1/sam2.1_hiera_l.yaml")
 parser.add_argument("--output-dir", default="output_single_video", help="Directory to save results")
 parser.add_argument("--force-cpu", action="store_true")
-parser.add_argument("--box-threshold", type=float, default=0.1)
-parser.add_argument("--text-threshold", type=float, default=0.1)
+parser.add_argument("--box-threshold", type=float, default=0.25)
+parser.add_argument("--text-threshold", type=float, default=0.25)
 args = parser.parse_args()
 
 # Constants

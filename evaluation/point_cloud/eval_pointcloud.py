@@ -21,14 +21,14 @@ from PIL import Image
 import imageio.v2 as imageio 
 
 # Add project root to path
-ROOT = Path(__file__).resolve().parents[2]  # Holi4D/
+ROOT = Path(__file__).resolve().parents[2]  # Track4World/
 sys.path.insert(0, str(ROOT))
 
 # Custom Project Imports
 import utils3d
-from holi4d.nets.model import Holi4D
-from holi4d.utils.geometry_torch import mask_aware_nearest_resize
-from holi4d.utils.alignment import align_points_scale_xyz_shift
+from track4world.nets.model import Track4World
+from track4world.utils.geometry_torch import mask_aware_nearest_resize
+from track4world.utils.alignment import align_points_scale_xyz_shift
 from utils import *
 from demo import load_model
 # ==============================================================================

@@ -20,13 +20,13 @@ from torch.utils.data import DataLoader
 # ==============================================================================
 
 # Add root to path
-ROOT = Path(__file__).resolve().parents[2]  # Holi4D/
+ROOT = Path(__file__).resolve().parents[2]  # Track4World/
 sys.path.insert(0, str(ROOT))
 
 # Custom Project Imports
-import holi4d.utils.basic
-from holi4d.utils.geometry_torch import mask_aware_nearest_resize
-from holi4d.utils.alignment import align_points_scale_xyz_shift
+import track4world.utils.basic
+from track4world.utils.geometry_torch import mask_aware_nearest_resize
+from track4world.utils.alignment import align_points_scale_xyz_shift
 from demo import load_model
 from frame_utils import *
 import utils3d
@@ -409,7 +409,7 @@ def _evaluate_model(model, loader, batch_processor_fn, alignment_exp=10, aligned
         rgb_images, gt_data, meta = batch_processor_fn(batch_blob)
         
         # --- B. Model Inference ---
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
             output = model.infer_pair(
                 rgb_images, 
                 iters=4, 
@@ -502,7 +502,7 @@ def _process_kitti_batch(batch_blob):
     
     # Prepare Ground Truth Flow (Absolute Coordinates)
     H, W = flow_gt.shape[1], flow_gt.shape[2]
-    grid_xy = holi4d.utils.basic.gridcloud2d(1, H, W, norm=False, device='cuda:0').float()
+    grid_xy = track4world.utils.basic.gridcloud2d(1, H, W, norm=False, device='cuda:0').float()
     grid_xy = grid_xy.reshape(1, H, W, 2) 
     
     flow2d_absolute = flow_gt + grid_xy 
@@ -611,7 +611,7 @@ def test_kubric(model: torch.nn.Module, args: argparse.Namespace):
         test_loader, 
         processor, 
         alignment_exp=20, 
-        aligned_scene_flow=False
+        aligned_scene_flow=True if args.len_level == 0  else False
     )
 
 
@@ -637,26 +637,32 @@ if __name__ == "__main__":
     # Disable gradient computation globally for evaluation
     torch.set_grad_enabled(False)
 
-    parser = argparse.ArgumentParser(description="Holi4D KITTI Flow Evaluation")
+    parser = argparse.ArgumentParser(description="Track4World KITTI Flow Evaluation")
 
     parser.add_argument(
         "--ckpt_init",
         type=str,
-        default="./checkpoints/holi4d.pth",
+        default="./checkpoints/track4world_da3.pth",
         help="Path to model checkpoint file"
     )
 
     parser.add_argument(
         "--config_path",
         type=str,
-        default="./holi4d/config/eval/v1.json",
+        default="./track4world/config/eval/v1.json",
         help="Path to model configuration JSON file"
     )
 
     parser.add_argument(
-        "--coordinate", type=str, default='camera_base', 
+        "--coordinate", type=str, default='world_depthanythingv3', 
         choices=['camera_base', 'world_pi3', 'world_depthanythingv3'],
         help="'camera': camera centric, 'world': world centric"
+    )
+
+    parser.add_argument(
+        "--use_original_backbone",
+        action="store_true",
+        help="Use the original pretrained backbone instead of the modified one."
     )
 
     parser.add_argument(

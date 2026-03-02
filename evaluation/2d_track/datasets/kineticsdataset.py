@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import pickle
 from datasets.pointdataset import PointDataset
-import holi4d.utils.data
+import track4world.utils.data
 import cv2
 from pathlib import Path
 import io
@@ -55,7 +55,7 @@ class KineticsDataset(PointDataset):
         _visibs = _visibs.transpose(1,0) # S,N
         valids = _visibs.copy()
 
-        rgbs, trajs_kin, _visibs, valids = holi4d.utils.data.standardize_test_data(
+        rgbs, trajs_kin, _visibs, valids = track4world.utils.data.standardize_test_data(
             rgbs, trajs_kin, _visibs, valids, only_first=self.only_first, seq_len=self.seq_len)
 
         rgbs = [cv2.resize(rgb, (self.crop_size[1], self.crop_size[0]), interpolation=cv2.INTER_LINEAR) for rgb in rgbs]
@@ -68,7 +68,7 @@ class KineticsDataset(PointDataset):
         _visibs = torch.from_numpy(_visibs).float() # S,N
         valids = torch.from_numpy(valids).float() # S,N
 
-        sample = holi4d.utils.data.VideoData(
+        sample = track4world.utils.data.VideoData(
             video=rgbs,
             trajs=trajs_kin,
             visibs=_visibs,

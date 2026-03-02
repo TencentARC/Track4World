@@ -14,8 +14,8 @@ import cv2
 import PIL.Image
 
 # Custom modules (Assuming these exist in your project structure)
-import holi4d.utils.basic
-import holi4d.utils.improc
+import track4world.utils.basic
+import track4world.utils.improc
 import utils3d
 
 # Configure logging
@@ -245,26 +245,33 @@ def draw_pts_gpu(
 
 def load_model(args, config: Dict) -> torch.nn.Module:
     """
-    Initializes the Holi4D model and loads pretrained weights.
+    Initializes the Track4World model and loads pretrained weights.
     """
-    from holi4d.nets.model import Holi4D
+    from track4world.nets.model import Track4World
     
-    logger.info("Initializing Holi4D Model...")
+    logger.info("Initializing Track4World Model...")
 
-    model = Holi4D(
+    model = Track4World(
         **config['model'],
         seqlen=16,
         use_3d=True,
         use_model=args.coordinate.split('_')[-1]
     )
-
     if args.ckpt_init and os.path.exists(args.ckpt_init):
         logger.info(f'Loading weights from local file: {args.ckpt_init}...')
         state_dict = torch.load(args.ckpt_init, map_location='cpu')
         model.load_state_dict(state_dict, strict=False)
+        if args.use_original_backbone:
+            model.switch_to_original_backbone()
     else:
         # Fallback to Hub download
-        url = "https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth"
+        if args.coordinate == 'world_pi3':
+            url = "https://huggingface.co/cyun9286/Track4World/resolve/main/track4world_pi3.pth"
+        elif args.coordinate == 'world_depthanythingv3':
+            url = "https://huggingface.co/cyun9286/Track4World/resolve/main/track4world_da3.pth"
+        else:
+            url = "https://huggingface.co/cyun9286/Track4World/resolve/main/track4world_moge.pth"
+            
         logger.info(f'Local checkpoint not found. Downloading from {url}...')
         state_dict = torch.hub.load_state_dict_from_url(
             url, map_location='cpu', check_hash=False
@@ -293,7 +300,7 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
 
     # Create 2D grid coordinates for flow calculation
     # Shape: 1, H*W, 2
-    grid_xy = holi4d.utils.basic.gridcloud2d(
+    grid_xy = track4world.utils.basic.gridcloud2d(
         1, H, W, norm=False, device='cuda:0'
     ).float() 
     grid_xy = grid_xy.permute(0, 2, 1).reshape(1, 1, 2, H, W) # 1, 1, 2, H, W
@@ -350,7 +357,7 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
     visconfs_e = visconfs_e.permute(0, 1, 3, 2)  # B, T, N, 2
 
     xy0 = trajs_e[0, 0].cpu().numpy()
-    colors = holi4d.utils.improc.get_2d_colors(xy0, H, W)
+    colors = track4world.utils.improc.get_2d_colors(xy0, H, W)
 
     fn = os.path.basename(args.mp4_path).split('.')[0]
     rgb_out_f = os.path.join(
@@ -363,7 +370,7 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
         f"{args.mode}_output", 
         f"temp_pt_vis_{fn}_rate{rate}_q{args.query_frame}"
     )
-    holi4d.utils.basic.mkdir(temp_dir)
+    track4world.utils.basic.mkdir(temp_dir)
 
     # Draw frames
     frames = draw_pts_gpu(
@@ -419,7 +426,7 @@ def forward_video3d_pair(rgbs: torch.Tensor, model: torch.nn.Module, args) -> Di
     else:
         # Default stride logic (can be adjusted)
         select_views = range(0, min(args.Ts, T_full), 1)
-        # select_views = range(0, T_full, 4)
+        #select_views = range(0, 220, 2)
     
     select_views = list(select_views)
     rgbs_selected = rgbs[:, select_views]
@@ -550,12 +557,13 @@ def save_efep(
     
     if vis_mode == 'geometry':
         points_vis = results['points'].permute(0, -1, 1, 2).clone()
+        camera_poses = results['camera_poses']
     elif vis_mode == 'flow':
         points_vis = results['traj_3d'].permute(0, -1, 1, 2).clone()
+        camera_poses = results['camera_poses'][1:]
     else:
         raise ValueError(f"Unknown visualization mode: {vis_mode}")
     
-    camera_poses = results['camera_poses']
     masks = results['masks'][:, None]
 
     T_pairs = all_pairwise_flows_3d.shape[0]
@@ -606,10 +614,10 @@ def save_efep(
         static_mask = ~dyn_mask
         
         dyn_mask_eroded = cv2.erode(
-            dyn_mask.astype(np.uint8), kernel, iterations=2
+            dyn_mask.astype(np.uint8), kernel, iterations=1
         ).astype(bool)
         static_mask_eroded = cv2.erode(
-            static_mask.astype(np.uint8), kernel, iterations=10
+            static_mask.astype(np.uint8), kernel, iterations=4
         ).astype(bool) 
         
         mask_eroded = dyn_mask_eroded | static_mask_eroded
@@ -699,7 +707,7 @@ def save_efep(
         
         # Visibility check: Confidence > 0.6 AND was valid in previous frame
         vis_t_torch = (
-            (all_visconf_maps[t_start - 1] > 0.6)[0] & mask_cleaned_t_start_np_pre
+            (all_visconf_maps[t_start - 1] > 0.3)[0] & mask_cleaned_t_start_np_pre
         )
         flow3d_torch = points_vis[t_start]
         dyn_mask_torch = masks_tensor[t_start]
@@ -971,9 +979,19 @@ def run_demo(model, args):
         masks_processed.append(is_dynamic)
 
     # 3. Convert to Tensor
-    masks_tensor = torch.stack(
-        [torch.from_numpy(m) for m in masks_processed], dim=0
-    )
+    try:
+        masks_tensor = torch.stack(
+            [torch.from_numpy(m) for m in masks_processed], dim=0
+        )
+    except Exception as e:
+        logger.warning(
+            f"Failed to process masks, fallback to all-ones mask. Reason: {e}"
+        )
+        # Fallback: use all-ones mask (no masking)
+        # Shape: (T, H, W)
+        masks_tensor = torch.zeros(
+            (len(rgbs_resized), H, W), dtype=torch.float32
+        )
     rgbs_tensor = [
         torch.from_numpy(rgb).permute(2, 0, 1) for rgb in rgbs_resized
     ]
@@ -984,25 +1002,26 @@ def run_demo(model, args):
     # 4. Inference
     results = None
     with torch.no_grad():
-        if args.mode == '2d':
-            logger.info("--- Running 2D Tracking Mode ---")
-            forward_video(rgbs_tensor.cuda(), framerate, model, args)
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            if args.mode == '2d':
+                logger.info("--- Running 2D Tracking Mode ---")
+                forward_video(rgbs_tensor.cuda(), framerate, model, args)
+            
+            elif args.mode == '3d_efep':
+                logger.info("--- Running 3D Pair Mode (Every Frame Every Pixel) ---")
+                results, select_views = forward_video3d_pair(
+                    rgbs_tensor.cuda(), model, args
+                )
+            
+            elif args.mode == '3d_ff':
+                logger.info("--- Running 3D First Frame Tracking Mode ---")
+                results, select_views = forward_video3d_ff(
+                    rgbs_tensor.cuda(), model, args
+                )
+            
+            else:
+                logger.warning("No valid mode selected ('2d', '3d_efep' or '3d_ff').")
         
-        elif args.mode == '3d_efep':
-            logger.info("--- Running 3D Pair Mode (Every Frame Every Pixel) ---")
-            results, select_views = forward_video3d_pair(
-                rgbs_tensor.cuda(), model, args
-            )
-        
-        elif args.mode == '3d_ff':
-            logger.info("--- Running 3D First Frame Tracking Mode ---")
-            results, select_views = forward_video3d_ff(
-                rgbs_tensor.cuda(), model, args
-            )
-        
-        else:
-            logger.warning("No valid mode selected ('2d', '3d_efep' or '3d_ff').")
-    
     masks_tensor = masks_tensor[select_views]
     rgbs_tensor = rgbs_tensor[:, select_views]
 
@@ -1011,7 +1030,17 @@ def run_demo(model, args):
 
     os.makedirs(save_rgb_dir, exist_ok=True)
     os.makedirs(save_mask_dir, exist_ok=True)
+    fps = 24
+    video_path = os.path.join(save_rgb_dir, "rgb.mp4")
 
+    C, H, W = rgbs_tensor.shape[-3:]
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # 通用
+    video_writer = cv2.VideoWriter(
+        video_path,
+        fourcc,
+        fps,
+        (W, H)
+    )
     for i, idx in enumerate(select_views):
         # RGB: shape (C, H, W) -> convert to HWC for cv2
         rgb_img = np.transpose(rgbs_tensor[0, i].numpy(), (1, 2, 0))
@@ -1019,12 +1048,13 @@ def run_demo(model, args):
         rgb_path = os.path.join(save_rgb_dir, f"frame_{i:04d}.png")
         # cv2 uses BGR
         cv2.imwrite(rgb_path, cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR))
-
+        video_writer.write(cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR))
         # Mask: 0=static, 1=dynamic -> scale to 0/255
         mask_img = (masks_tensor[i].numpy() * 255).astype(np.uint8)
         mask_path = os.path.join(save_mask_dir, f"mask_{i:04d}.png")
         cv2.imwrite(mask_path, mask_img)
 
+    video_writer.release()
     logger.info(f"Saved {len(select_views)} frames to:")
     logger.info(f"  RGBs: {save_rgb_dir}")
     logger.info(f"  Masks: {save_mask_dir}")
@@ -1049,11 +1079,11 @@ def run_demo(model, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Holi4D Demo Script")
+    parser = argparse.ArgumentParser(description="Track4World Demo Script")
     
     # --- Paths and Model Config ---
     parser.add_argument(
-        "--ckpt_init", type=str, default='checkpoints/holi4d.pth', 
+        "--ckpt_init", type=str, default='checkpoints/track4world_da3.pth', 
         help="Path to local checkpoint file (optional)"
     )
     parser.add_argument(
@@ -1061,7 +1091,7 @@ def main():
         help="Input MP4 video file path"
     )
     parser.add_argument(
-        "--config_path", type=str, default='holi4d/config/eval/v1.json', 
+        "--config_path", type=str, default='track4world/config/eval/v1.json', 
         help="Path to model config json"
     )
     
@@ -1084,11 +1114,15 @@ def main():
         help="'flow': visualize flow, 'geometry': visualize geometry"
     )
     parser.add_argument(
-        "--coordinate", type=str, default='camera_base', 
+        "--coordinate", type=str, default='world_depthanythingv3', 
         choices=['camera_base', 'world_pi3', 'world_depthanythingv3'],
         help="'camera': camera centric, 'world': world centric"
     )
-    
+    parser.add_argument(
+        "--use_original_backbone",
+        action="store_true",
+        help="Use the original pretrained backbone instead of the modified one."
+    )
     # --- Inference Params ---
     parser.add_argument(
         "--query_frame", type=int, default=0, 
@@ -1099,7 +1133,7 @@ def main():
         help="Max image dimension for resize"
     )
     parser.add_argument(
-        "--max_frames", type=int, default=400, 
+        "--max_frames", type=int, default=1000, 
         help="Max frames to process"
     )
     parser.add_argument(

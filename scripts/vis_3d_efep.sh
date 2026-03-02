@@ -1,1 +1,0 @@
-/data/miniconda3/envs/holi4d/bin/python visualization/vis_3d_efep_world.py --ply_dir /group/40075/jiahaolu/cleaned_code/Holi4D/results/snowboard/3d_efep_output

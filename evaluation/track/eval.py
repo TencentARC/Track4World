@@ -19,14 +19,15 @@ import torch.utils.data as data
 from torch.utils.data import DataLoader
 
 # Add root to path
-ROOT = Path(__file__).resolve().parents[2]  # Holi4D/
+ROOT = Path(__file__).resolve().parents[2]  # Track4World/
 sys.path.insert(0, str(ROOT))
 
 # Custom modules
-import holi4d.utils.basic
-from holi4d.nets.model import Holi4D
-from holi4d.utils.alignment import align_points_scale_xyz_shift
+import track4world.utils.basic
+from track4world.nets.model import Track4World
+from track4world.utils.alignment import align_points_scale_xyz_shift
 from tapvid3d_metrics import compute_tapvid3d_metrics
+from demo import load_model
 
 # Configure logging
 logging.basicConfig(
@@ -216,7 +217,10 @@ class TrackingEvalDataset(data.Dataset):
         tracks_cam = sample['tracks_XYZ']
         vis = sample['visibility']
         intrinsics = sample['fx_fy_cx_cy']
-        
+        if self.dataset_name == 'pstudio': 
+            w2c = np.repeat(np.eye(4)[None, :, :], images.shape[0], axis=0)
+        else:
+            w2c = sample['extrinsics_w2c']
         # Project 3D points to get 2D ground truth tracks
         h, w = images.shape[-3], images.shape[-2]
         tracks_uv, masks = project_points_to_video_frame(tracks_cam, intrinsics, h, w)
@@ -230,6 +234,13 @@ class TrackingEvalDataset(data.Dataset):
         tracks_cam = tracks_cam[:num_frames]
         tracks_uv = tracks_uv[:num_frames]
         vis = vis[:num_frames]
+        w2c = w2c[:num_frames]
+
+        c2w = np.linalg.inv(w2c)
+        trans_mats = np.matmul(w2c[0:1], c2w)
+        ones = np.ones_like(tracks_cam[..., :1])
+        tracks_cam_homo = np.concatenate([tracks_cam, ones], axis=-1)
+        tracks_world = np.einsum('tij,tnj->tni', trans_mats, tracks_cam_homo)[..., :3]
 
         # Filter points: Keep points that appear at least twice and are visible in the first frame
         # Note: This logic assumes we only track points visible at start (t=0) or handles them later?
@@ -238,6 +249,7 @@ class TrackingEvalDataset(data.Dataset):
         valid_points = (count >= 2) & (vis[0])
         
         tracks_cam = tracks_cam[:, valid_points]
+        tracks_world = tracks_world[:, valid_points]
         tracks_uv = tracks_uv[:, valid_points]
         vis = vis[:, valid_points]
 
@@ -247,8 +259,23 @@ class TrackingEvalDataset(data.Dataset):
             images, tracks_cam, tracks_uv, vis, intrinsics = \
                 resize_all(images, tracks_cam, tracks_uv, vis, intrinsics, new_size)
                 
-        return images, tracks_cam, tracks_uv, vis, intrinsics
+        return images, tracks_cam, tracks_world, tracks_uv, vis, intrinsics
 
+def transform_to_first_frame(trajs, poses):
+    """
+    trajs: (B, T, N, 3) - 3D points in current camera frame
+    poses: (T, 4, 4)    - Camera-to-World matrices (c2w)
+    """
+    B, T, N, _ = trajs.shape
+    # Pose_0 (4, 4) -> inv -> (4, 4)
+    w2c_0 = torch.linalg.inv(poses[0]) 
+    # transforms: (T, 4, 4)
+    transforms = torch.matmul(w2c_0.unsqueeze(0), poses)
+    ones = torch.ones((B, T, N, 1), device=trajs.device, dtype=trajs.dtype)
+    trajs_homo = torch.cat([trajs, ones], dim=-1)
+    trajs_world_0 = torch.einsum('tij,btnj->btni', transforms, trajs_homo)
+
+    return trajs_world_0[..., :3]
 
 # ==============================================================================
 # Evaluation Logic
@@ -292,7 +319,7 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
     # 3. Evaluation Loop
     for i_batch, test_data_blob in enumerate(tqdm(test_loader)):
         # Move data to GPU
-        rgbs, trajs_g, tracks_uv, vis_g, intrinsics = [item.cuda() for item in test_data_blob]
+        rgbs, trajs_g, tracks_w, tracks_uv, vis_g, intrinsics = [item.cuda() for item in test_data_blob]
         
         # Skip if no valid points
         if vis_g.shape[-1] == 0:
@@ -307,7 +334,7 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
         __, first_positive_inds = torch.max(vis_g, dim=1)
 
         # Create coordinate grid
-        grid_xy = holi4d.utils.basic.gridcloud2d(1, H, W, norm=False, device='cuda:0').float()
+        grid_xy = track4world.utils.basic.gridcloud2d(1, H, W, norm=False, device='cuda:0').float()
         grid_xy = grid_xy.permute(0, 2, 1).reshape(1, 1, 2, H, W) # (1, 1, 2, H, W)
 
         # Initialize containers for estimated trajectories
@@ -320,93 +347,94 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
         pre_first_positive_ind = 0
 
         # Mixed precision context
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
-            
-            # Group points by their starting frame (Chunking strategy)
-            # This allows processing points that appear at t=0, t=1, etc. separately
-            unique_start_frames = torch.unique(first_positive_inds)
-            
-            for first_positive_ind in unique_start_frames:
-                # Get indices of points starting at this specific frame
-                chunk_pt_idxs = torch.nonzero(first_positive_inds[0] == first_positive_ind, as_tuple=False)[:, 0]
+        with torch.no_grad():
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
                 
-                # Get query points (B, K, 2)
-                chunk_pts = tracks_uv[:, first_positive_ind[None].repeat(chunk_pt_idxs.shape[0]), chunk_pt_idxs]
+                # Group points by their starting frame (Chunking strategy)
+                # This allows processing points that appear at t=0, t=1, etc. separately
+                unique_start_frames = torch.unique(first_positive_inds)
                 
-                # Store query info: [Frame_Index, X, Y]
-                query_points_all.append(torch.cat([first_positive_inds[:, chunk_pt_idxs, None], chunk_pts], dim=2))
-                
-                # Initialize maps for this chunk
-                traj_maps_e = grid_xy.repeat(1, T, 1, 1, 1).clone()
-                traj_maps3d_e = torch.zeros((B, T, H, W, 3)).cuda()
-                visconf_maps_e = torch.zeros_like(traj_maps_e).clone()
-
-                # Update internal state (eval_dict) if moving forward in time
-                if eval_dict is not None:
-                    offset = first_positive_ind - pre_first_positive_ind
-                    # Shift features/maps to align with the new start time
-                    keys_to_shift = ['fmaps', 'ctxfeats', 'fmaps3d_detail', 'pms', 'points', 'masks']
-                    # Iterate through specific feature keys to maintain temporal alignment
-                    for key in keys_to_shift:
-                        if key in eval_dict:
-                            # If the feature has a temporal dimension (ndim > 1), 
-                            # slice starting from the offset
-                            if eval_dict[key].ndim > 1:
-                                eval_dict[key] = eval_dict[key][:, offset:]
-                            else:
-                                # For 1D tensors, slice directly along the first axis
-                                eval_dict[key] = eval_dict[key][offset:]
-
-                # Run Model Inference
-                if first_positive_ind < T - 1:
-                    output, eval_dict = model.infer(
-                        rgbs[:, first_positive_ind:], 
-                        iters=4, 
-                        sw=None, 
-                        is_training=False, 
-                        tracking3d=True, 
-                        force_projection=True, 
-                        eval_dict=None 
-                        # Note: In original code, eval_dict was passed as None here. 
-                        # If state persistence is needed, check model implementation.
-                    )
+                for first_positive_ind in unique_start_frames:
+                    # Get indices of points starting at this specific frame
+                    chunk_pt_idxs = torch.nonzero(first_positive_inds[0] == first_positive_ind, as_tuple=False)[:, 0]
                     
-                    # Extract outputs
-                    pred_2d_motion = output[1]['flow_2d']
-                    visconf = output[1]['visconf_maps_e']
-                    pred_3dmotion = output[1]['flow_3d']
-
-                    # Fill result maps
-                    traj_maps_e[:, first_positive_ind:] = pred_2d_motion
-                    traj_maps3d_e[:, first_positive_ind:] = pred_3dmotion
-                    visconf_maps_e[:, first_positive_ind:] = visconf
+                    # Get query points (B, K, 2)
+                    chunk_pts = tracks_uv[:, first_positive_ind[None].repeat(chunk_pt_idxs.shape[0]), chunk_pt_idxs]
                     
-                    # Cleanup
-                    del output, pred_2d_motion, pred_3dmotion, visconf
-                    torch.cuda.empty_cache()
-                
-                pre_first_positive_ind = first_positive_ind
+                    # Store query info: [Frame_Index, X, Y]
+                    query_points_all.append(torch.cat([first_positive_inds[:, chunk_pt_idxs, None], chunk_pts], dim=2))
+                    
+                    # Initialize maps for this chunk
+                    traj_maps_e = grid_xy.repeat(1, T, 1, 1, 1).clone()
+                    traj_maps3d_e = torch.zeros((B, T, H, W, 3)).cuda()
+                    visconf_maps_e = torch.zeros_like(traj_maps_e).clone()
 
-                # Sample the dense flow maps at the query point locations
-                # Get integer coordinates of query points
-                xyt = tracks_uv[:, first_positive_ind].round().long()[0, chunk_pt_idxs] # (K, 2)
-                
-                # Gather 2D Trajectories
-                trajs_e_chunk = traj_maps_e[:, :, :, xyt[:, 1], xyt[:, 0]] # (B, T, 2, K)
-                trajs_e_chunk = trajs_e_chunk.permute(0, 1, 3, 2) # (B, T, K, 2)
-                # Scatter back to global tensor
-                scatter_idx_2d = chunk_pt_idxs[None, None, :, None].repeat(1, trajs_e_chunk.shape[1], 1, 2)
-                trajs_e.scatter_add_(2, scatter_idx_2d, trajs_e_chunk)
+                    # Update internal state (eval_dict) if moving forward in time
+                    if eval_dict is not None:
+                        offset = first_positive_ind - pre_first_positive_ind
+                        # Shift features/maps to align with the new start time
+                        keys_to_shift = ['fmaps', 'ctxfeats', 'fmaps3d_detail', 'pms', 'points', 'masks']
+                        # Iterate through specific feature keys to maintain temporal alignment
+                        for key in keys_to_shift:
+                            if key in eval_dict:
+                                # If the feature has a temporal dimension (ndim > 1), 
+                                # slice starting from the offset
+                                if eval_dict[key].ndim > 1:
+                                    eval_dict[key] = eval_dict[key][:, offset:]
+                                else:
+                                    # For 1D tensors, slice directly along the first axis
+                                    eval_dict[key] = eval_dict[key][offset:]
 
-                # Gather 3D Trajectories
-                trajs3d_e_chunk = traj_maps3d_e[:, :, xyt[:, 1], xyt[:, 0]]
-                scatter_idx_3d = chunk_pt_idxs[None, None, :, None].repeat(1, trajs3d_e_chunk.shape[1], 1, 3)
-                trajs3d_e.scatter_add_(2, scatter_idx_3d, trajs3d_e_chunk)
+                    # Run Model Inference
+                    if first_positive_ind < T - 1:
+                        output, eval_dict = model.infer(
+                            rgbs[:, first_positive_ind:], 
+                            iters=4, 
+                            sw=None, 
+                            is_training=False, 
+                            tracking3d=True, 
+                            force_projection=True, 
+                            eval_dict=None 
+                            # Note: In original code, eval_dict was passed as None here. 
+                            # If state persistence is needed, check model implementation.
+                        )
+                        camera_poses = output[0]['camera_poses']
+                        # Extract outputs
+                        pred_2d_motion = output[1]['flow_2d']
+                        visconf = output[1]['visconf_maps_e']
+                        pred_3dmotion = output[1]['flow_3d']
 
-                # Gather Visibility Confidence
-                visconfs_e_chunk = visconf_maps_e[:, :, :, xyt[:, 1], xyt[:, 0]]
-                visconfs_e_chunk = visconfs_e_chunk.permute(0, 1, 3, 2)
-                visconfs_e.scatter_add_(2, scatter_idx_2d, visconfs_e_chunk)
+                        # Fill result maps
+                        traj_maps_e[:, first_positive_ind:] = pred_2d_motion
+                        traj_maps3d_e[:, first_positive_ind:] = pred_3dmotion
+                        visconf_maps_e[:, first_positive_ind:] = visconf
+                        
+                        # Cleanup
+                        del output, pred_2d_motion, pred_3dmotion, visconf
+                        torch.cuda.empty_cache()
+                    
+                    pre_first_positive_ind = first_positive_ind
+
+                    # Sample the dense flow maps at the query point locations
+                    # Get integer coordinates of query points
+                    xyt = tracks_uv[:, first_positive_ind].round().long()[0, chunk_pt_idxs] # (K, 2)
+                    
+                    # Gather 2D Trajectories
+                    trajs_e_chunk = traj_maps_e[:, :, :, xyt[:, 1], xyt[:, 0]] # (B, T, 2, K)
+                    trajs_e_chunk = trajs_e_chunk.permute(0, 1, 3, 2) # (B, T, K, 2)
+                    # Scatter back to global tensor
+                    scatter_idx_2d = chunk_pt_idxs[None, None, :, None].repeat(1, trajs_e_chunk.shape[1], 1, 2)
+                    trajs_e.scatter_add_(2, scatter_idx_2d, trajs_e_chunk)
+
+                    # Gather 3D Trajectories
+                    trajs3d_e_chunk = traj_maps3d_e[:, :, xyt[:, 1], xyt[:, 0]]
+                    scatter_idx_3d = chunk_pt_idxs[None, None, :, None].repeat(1, trajs3d_e_chunk.shape[1], 1, 3)
+                    trajs3d_e.scatter_add_(2, scatter_idx_3d, trajs3d_e_chunk)
+
+                    # Gather Visibility Confidence
+                    visconfs_e_chunk = visconf_maps_e[:, :, :, xyt[:, 1], xyt[:, 0]]
+                    visconfs_e_chunk = visconfs_e_chunk.permute(0, 1, 3, 2)
+                    visconfs_e.scatter_add_(2, scatter_idx_2d, visconfs_e_chunk)
 
         # Post-process visibility confidence
         visconfs_e[..., 0] *= visconfs_e[..., 1] # Combine scores if needed
@@ -417,9 +445,14 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
 
         # Prepare Ground Truth and Predictions for Metric Calculation
         gt_occluded = (vis_g < 0.5).bool().transpose(1, 2) # (B, N, T)
-        gt_tracks3d = trajs_g
-        pred_tracks3d = trajs3d_e
+        pred_occluded =  (visconfs_e[..., 0] < 0.5).bool().transpose(1, 2)
 
+        if args.world_eval:
+            gt_tracks3d = tracks_w
+            pred_tracks3d = transform_to_first_frame(trajs3d_e, camera_poses)
+        else:
+            gt_tracks3d = trajs_g
+            pred_tracks3d = trajs3d_e
         # 3D Alignment (Scale & Shift)
         # Since monocular depth is up to scale, we align predictions to GT
         # using visible points.
@@ -435,9 +468,9 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
             align_src = pred_tracks3d.reshape(-1, 3)[::4]
             align_tgt = gt_tracks3d.reshape(-1, 3)[::4]
             align_weights = 1 / torch.ones_like(align_tgt.norm(dim=-1))
-            
+        # torch.cuda.empty_cache()
         scale, shift = align_points_scale_xyz_shift(
-            align_src, align_tgt, align_weights, exp=20
+            align_src, align_tgt, align_weights, exp=10
         )
         
         pred_tracks3d_aligned = pred_tracks3d * scale + shift
@@ -446,7 +479,7 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
         out_metrics, scaled_pred_traj_3d = compute_tapvid3d_metrics(
             gt_occluded=gt_occluded.transpose(1, 2).cpu().numpy(),
             gt_tracks=gt_tracks3d.cpu().numpy(),
-            pred_occluded=gt_occluded.transpose(1, 2).cpu().numpy(),
+            pred_occluded=pred_occluded.transpose(1, 2).cpu().numpy(),
             pred_tracks=pred_tracks3d_aligned.cpu().numpy(),
             intrinsics_params=intrinsics[0].cpu().numpy(),
             scaling="median",
@@ -460,51 +493,10 @@ def test_track(model: torch.nn.Module, args: argparse.Namespace):
         count_all += 1
         for key in metrics_all:
             metrics_all[key] += out_metrics[key] 
-        for key in metrics_all:
-            print(f"{key}: {metrics_all[key] / count_all}")
     # 4. Print Final Results
     logger.info("Evaluation Complete. Results:")
     for key in metrics_all:
         print(f"{key}: {metrics_all[key] / count_all}")
-
-
-# ==============================================================================
-# Model Loading
-# ==============================================================================
-
-def load_model(args: argparse.Namespace, config: Dict) -> torch.nn.Module:
-    """
-    Initializes the Holi4D model and loads pretrained weights.
-    """
-    logger.info("Initializing Holi4D Model...")
-
-    model = Holi4D(
-        **config['model'],
-        seqlen=16,
-        use_3d=True,
-    )
-
-    if args.ckpt_init and os.path.exists(args.ckpt_init):
-        logger.info(f'Loading weights from local file: {args.ckpt_init}...')
-        state_dict = torch.load(args.ckpt_init, map_location='cpu')
-        model.load_state_dict(state_dict, strict=False)
-    else:
-        # Fallback to Hub download
-        url = "https://huggingface.co/cyun9286/holi4d/resolve/main/holi4d.pth"
-        logger.info(f'Local checkpoint not found. Downloading from {url}...')
-        state_dict = torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
-        model.load_state_dict(state_dict, strict=False)
-    
-    model.cuda()
-    model.eval()
-    
-    # Freeze parameters
-    for p in model.parameters():
-        p.requires_grad = False
-    
-    logger.info('Model loaded and set to evaluation mode.')
-    return model
-
 
 # ==============================================================================
 # Main Entry Point
@@ -514,19 +506,19 @@ if __name__ == "__main__":
     # Disable gradient computation globally for evaluation
     torch.set_grad_enabled(False)
 
-    parser = argparse.ArgumentParser(description="Holi4D Evaluation / Tracking Script")
+    parser = argparse.ArgumentParser(description="Track4World Evaluation / Tracking Script")
 
     parser.add_argument(
         "--ckpt_init",
         type=str,
-        default="./checkpoints/holi4d.pth",
+        default="./checkpoints/track4world_da3.pth",
         help="Path to model checkpoint file"
     )
 
     parser.add_argument(
         "--config_path",
         type=str,
-        default="./holi4d/config/eval/v1.json",
+        default="./track4world/config/eval/v1.json",
         help="Path to model configuration JSON file"
     )
 
@@ -536,6 +528,22 @@ if __name__ == "__main__":
         default=16,
         choices=[16, 50],
         help="Number of frames used for tracking"
+    )
+    parser.add_argument(
+        "--world_eval",
+        action="store_true",
+        help="Evaluate results in the world coordinate system."
+    )
+    parser.add_argument(
+        "--coordinate", type=str, default='world_depthanythingv3', 
+        choices=['camera_base', 'world_pi3', 'world_depthanythingv3'],
+        help="'camera': camera centric, 'world': world centric"
+    )
+
+    parser.add_argument(
+        "--use_original_backbone",
+        action="store_true",
+        help="Use the original pretrained backbone instead of the modified one."
     )
 
     parser.add_argument(
@@ -558,5 +566,17 @@ if __name__ == "__main__":
 
     # Build model and run evaluation
     model = load_model(args, config)
+    num_params = sum(
+    p.numel()
+    for name, p in model.named_parameters()
+    if not name.startswith("backbone.")
+    )
+    print(f"Total parameters (w/o backbone): {num_params / 1e6:.2f} M")
+    num_params = sum(
+    p.numel()
+    for name, p in model.named_parameters()
+    if name.startswith("backbone.")
+    )
+    print(f"Total parameters (w backbone): {num_params / 1e6:.2f} M")
     test_track(model, args)
 
