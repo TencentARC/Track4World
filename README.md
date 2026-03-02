@@ -204,7 +204,7 @@ python visualization/vis_3d_efep_world.py --ply_dir results/cat/3d_efep_output
 ```
 
 <div align="center">
-  <img src="assets/demo.gif" width="100%" alt="Visualization Demo">
+  <img src="assets/demo_world.gif" width="100%" alt="Visualization Demo">
 </div>
 
 ---
