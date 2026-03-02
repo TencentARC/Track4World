@@ -36,64 +36,64 @@ DEFAULT_WXYZ = (-0.05, 0.98, -0.17, -0.12)
 
 def fade_color_saturation_batch(rgb_uint8, factor):
     """
-    批量处理 RGB 数组 (N, 3)
-    factor: 0.0 (灰度) 到 1.0 (原色)
+    Batch process RGB arrays (N, 3)
+    factor: 0.0 (grayscale) to 1.0 (original color)
     """
     if factor == 1.0:
         return rgb_uint8
     rgb_float = rgb_uint8 / 255.0
     hsv = mcolors.rgb_to_hsv(rgb_float)
-    hsv[..., 1] *= factor  # 仅缩放饱和度通道
+    hsv[..., 1] *= factor  # Only scale the saturation channel
     new_rgb = mcolors.hsv_to_rgb(hsv)
     return (new_rgb * 255).astype(np.uint8)
 
 def fade_color_saturation(rgb_uint8, factor):
     """
     rgb_uint8: (3,) uint8 array
-    factor: 0.0 (褪色为灰) 到 1.0 (原色)
+    factor: 0.0 (fade to gray) to 1.0 (original color)
     """
-    # 归一化到 0-1 并转为 HSV
+    # Normalize to 0-1 and convert to HSV
     rgb_float = rgb_uint8 / 255.0
     hsv = mcolors.rgb_to_hsv(rgb_float)
     
-    # 降低饱和度，保持亮度
+    # Reduce saturation, maintain brightness
     hsv[1] = hsv[1] * factor 
     
-    # 转回 RGB
+    # Convert back to RGB
     new_rgb = mcolors.hsv_to_rgb(hsv)
     return (new_rgb * 255).astype(np.uint8)
 
 def canonicalize_quaternions(quats):
     """
-    解决四元数双倍覆盖问题 (q 和 -q 代表同一旋转)。
-    确保相邻帧的四元数点积为正，保证插值路径最短。
+    Solve the quaternion double cover problem (q and -q represent the same rotation).
+    Ensure the dot product of quaternions in adjacent frames is positive to guarantee the shortest interpolation path.
     """
     canon_quats = quats.copy()
     for i in range(1, len(canon_quats)):
         prev = canon_quats[i - 1]
         curr = canon_quats[i]
-        # 如果点积为负，说明走的是“长路径”，将当前四元数取反
+        # If the dot product is negative, it means taking the "long path", so negate the current quaternion
         if np.dot(prev, curr) < 0:
             canon_quats[i] = -curr
     return canon_quats
 
 def smooth_translation_spline(t, smoothing=0.5):
     """
-    使用 UnivariateSpline 进行平移平滑。
-    相比 Savitzky-Golay，Spline 更能保证全局的物理连续性 (C2 连续)。
-    smoothing: 平滑因子，越大越平滑，越小越贴近原轨迹。
+    Use UnivariateSpline for translation smoothing.
+    Compared to Savitzky-Golay, Spline better ensures global physical continuity (C2 continuity).
+    smoothing: Smoothing factor, larger means smoother, smaller means closer to original trajectory.
     """
     T = t.shape[0]
     x = np.arange(T)
     t_smooth = np.zeros_like(t)
     
-    # 对 x, y, z 分别拟合
+    # Fit x, y, z respectively
     weights = np.ones(T) 
-    # (可选) 如果有置信度，可以降低某些帧的权重
+    # (Optional) If confidence is available, weights of some frames can be reduced
     
     for i in range(3):
-        # s 是平滑参数，需要根据数据噪声程度调整
-        # s=0 插值经过所有点，s很大则变成直线
+        # s is the smoothing parameter, needs to be adjusted based on data noise level
+        # s=0 interpolates through all points, a large s becomes a straight line
         spl = UnivariateSpline(x, t[:, i], w=weights, s=smoothing)
         t_smooth[:, i] = spl(x)
         
@@ -101,56 +101,56 @@ def smooth_translation_spline(t, smoothing=0.5):
 
 def smooth_rotation_savgol(rot_objs, win=21, poly=3):
     """
-    对旋转进行平滑。
-    1. 提取四元数
-    2. 连续化 (Canonicalize)
-    3. Savitzky-Golay 滤波
-    4. 归一化
+    Smooth rotations.
+    1. Extract quaternions
+    2. Canonicalize
+    3. Savitzky-Golay filtering
+    4. Normalize
     """
     quats = rot_objs.as_quat()
     
-    # 关键步骤：解决符号跳变
+    # Key step: resolve sign flips
     quats = canonicalize_quaternions(quats)
     
-    # 确保窗口是奇数
+    # Ensure window is odd
     if win % 2 == 0: win += 1
     
-    # 滤波
+    # Filter
     quats_smooth = savgol_filter(quats, window_length=win, polyorder=poly, axis=0, mode='interp')
     
-    # 归一化 (滤波后模长不为1)
+    # Normalize (norm is not 1 after filtering)
     quats_smooth /= np.linalg.norm(quats_smooth, axis=1, keepdims=True)
     
     return R.from_quat(quats_smooth)
 
 def smooth_c2w(c2w, 
-                        trans_smoothing=1.0, # 平移平滑度 (Spline s参数)
-                        rot_window=21,       # 旋转窗口大小
-                        rot_poly=3):         # 旋转多项式阶数
+                        trans_smoothing=1.0, # Translation smoothness (Spline s parameter)
+                        rot_window=21,       # Rotation window size
+                        rot_poly=3):         # Rotation polynomial order
     """
-    c2w: (T, 4, 4) 或 (T, 3, 4)
+    c2w: (T, 4, 4) or (T, 3, 4)
     """
     T = c2w.shape[0]
     c2w_smooth = c2w.copy()
     
-    # 1. 分离旋转和平移
+    # 1. Separate rotation and translation
     raw_t = c2w[:, :3, 3]
     raw_R = c2w[:, :3, :3]
     
-    # 2. 平滑平移 (Spline 方法)
-    # Spline 的 s 参数取决于数据的数值范围。
-    # 如果数据是米制(scale~1.0)，s=0.1~1.0 比较合适。
-    # 如果平移抖动严重，增大 s。
+    # 2. Smooth translation (Spline method)
+    # Spline's s parameter depends on the data value range.
+    # If data is in meters (scale~1.0), s=0.1~1.0 is suitable.
+    # If translation jitter is severe, increase s.
     print(f"Smoothing Translation (Spline, s={trans_smoothing})...")
     smooth_t = smooth_translation_spline(raw_t, smoothing=trans_smoothing)
     
-    # 3. 平滑旋转 (Savitzky-Golay on Unwrapped Quaternions)
+    # 3. Smooth rotation (Savitzky-Golay on Unwrapped Quaternions)
     print(f"Smoothing Rotation (SavGol, win={rot_window}, poly={rot_poly})...")
     rot_objs = R.from_matrix(raw_R)
     smooth_r_objs = smooth_rotation_savgol(rot_objs, win=rot_window, poly=rot_poly)
     smooth_R = smooth_r_objs.as_matrix()
     
-    # 4. 重组
+    # 4. Recombine
     c2w_smooth[:, :3, :3] = smooth_R
     c2w_smooth[:, :3, 3] = smooth_t
     
@@ -158,47 +158,47 @@ def smooth_c2w(c2w,
 
 def smooth_trajectories_temporal(trajs, mask, sigma=2.0):
     """
-    对轨迹进行时间维度的平滑，使用高斯滤波以获得极高的平滑度。
+    Smooth trajectories in the temporal dimension using Gaussian filtering for extremely high smoothness.
     
     Args:
-        trajs: (T, N, 3) 轨迹数据
-        mask: (T, N) 可见性掩码
-        sigma: 平滑强度。
-               sigma=1.0: 轻微平滑
-               sigma=2.0-3.0: 非常平滑 (推荐)
-               sigma=5.0+: 极度平滑 (可能会导致快速转弯处出现“切角”)
+        trajs: (T, N, 3) Trajectory data
+        mask: (T, N) Visibility mask
+        sigma: Smoothing strength.
+               sigma=1.0: Slight smoothing
+               sigma=2.0-3.0: Very smooth (recommended)
+               sigma=5.0+: Extremely smooth (may cause "corner cutting" in fast turns)
     """
     print(f"Smoothing point trajectories (Gaussian, sigma={sigma})...")
     T, N, D = trajs.shape
     smoothed_trajs = trajs.copy()
     
-    # 定义最小片段长度，短于此长度的片段不进行平滑（避免过度拟合噪声）
+    # Define minimum segment length, segments shorter than this are not smoothed (to avoid overfitting noise)
     min_segment_len = max(int(sigma * 3), 5) 
 
     for i in tqdm(range(N), desc="Smoothing Trajectories"):
-        # 1. 获取当前点的所有有效帧索引
+        # 1. Get all valid frame indices for the current point
         valid_indices = np.where(mask[:, i])[0]
         
         if len(valid_indices) == 0:
             continue
             
-        # 2. 识别连续片段 (Split into continuous segments)
-        # 如果索引跳跃超过 1，说明中间有断层 (Gap)
-        # 例如: [1, 2, 3, 10, 11, 12] -> [1, 2, 3] 和 [10, 11, 12]
+        # 2. Identify continuous segments (Split into continuous segments)
+        # If index jump is greater than 1, it means there is a gap in between
+        # For example: [1, 2, 3, 10, 11, 12] -> [1, 2, 3] and [10, 11, 12]
         splits = np.where(np.diff(valid_indices) > 1)[0] + 1
         segments = np.split(valid_indices, splits)
         
         for seg_idx in segments:
-            # 如果片段太短，高斯滤波没有意义，跳过
+            # If segment is too short, Gaussian filtering is meaningless, skip
             if len(seg_idx) < min_segment_len:
                 continue
             
-            # 3. 提取该片段的 3D 数据 (L, 3)
+            # 3. Extract 3D data for this segment (L, 3)
             raw_data = trajs[seg_idx, i, :]
             
-            # 4. 应用高斯滤波
-            # axis=0 表示沿时间轴平滑
-            # mode='nearest' 使得边界处平滑过渡，不会发散
+            # 4. Apply Gaussian filtering
+            # axis=0 means smooth along the time axis
+            # mode='nearest' makes the boundary transition smooth, won't diverge
             smooth_data = gaussian_filter1d(
                 raw_data, 
                 sigma=sigma, 
@@ -206,7 +206,7 @@ def smooth_trajectories_temporal(trajs, mask, sigma=2.0):
                 mode='nearest'
             )
             
-            # 5. 写回结果
+            # 5. Write back the results
             smoothed_trajs[seg_idx, i, :] = smooth_data
             
     return smoothed_trajs
@@ -374,7 +374,7 @@ def main(
     )
     # --- 3. Load Point Clouds (Split Static/Dynamic) ---
     dynamic_point_nodes: List[viser.PointCloudHandle] = []
-    dynamic_colors_original: List[np.ndarray] = []  # 新增：存储原始颜色副本
+    dynamic_colors_original: List[np.ndarray] = []  # New: store original color copies
     static_points_accumulator = []
     static_colors_accumulator = []
 
@@ -408,7 +408,7 @@ def main(
         points_world = 100 * points_world * [1, -1, -1]
         
         pts_dyn = points_world[is_dynamic]
-        col_dyn_uint8 = (colors[is_dynamic] * 255).astype(np.uint8) # 转换为 uint8
+        col_dyn_uint8 = (colors[is_dynamic] * 255).astype(np.uint8) # Convert to uint8
         pts_stat = points_world[~is_dynamic]
         col_stat = colors[~is_dynamic]
 
@@ -422,7 +422,7 @@ def main(
             visible=False 
         )
         dynamic_point_nodes.append(node)
-        dynamic_colors_original.append(col_dyn_uint8) # 保存副本
+        dynamic_colors_original.append(col_dyn_uint8) # Save copy
 
         # Accumulate static points
         if i % STATIC_SKIP_FRAMES == 0 and len(pts_stat) > 0:
@@ -585,12 +585,12 @@ def main(
             "Dyn. Saturation", min=0.0, max=1.0, step=0.01, initial_value=1.0
         )
 
-        # 实时滑动反馈：当滑动条变动时，立刻更新当前正在显示的帧
+        # Real-time slider feedback: update the currently displayed frame immediately when the slider changes
         @gui_dyn_saturation.on_update
         def _(_):
             t_curr = gui_timestep.value
             if t_curr < len(dynamic_point_nodes):
-                # 立刻更新当前帧的视觉效果
+                # Update the visual effect of the current frame immediately
                 dynamic_point_nodes[t_curr].colors = fade_color_saturation_batch(
                     dynamic_colors_original[t_curr], 
                     gui_dyn_saturation.value
@@ -629,7 +629,7 @@ def main(
                 node.visible = True
                 node.point_size = gui_dynamic_point_size.value
                 
-                # --- 关键修改：每一帧显示前应用滑动条的饱和度 ---
+                # --- Key modification: apply slider saturation before displaying each frame ---
                 node.colors = fade_color_saturation_batch(
                     dynamic_colors_original[t_curr], 
                     gui_dyn_saturation.value
@@ -718,17 +718,17 @@ def main(
                     keep_mask = active_lookup[h_ind]
                     
                     if np.any(keep_mask):
-                        # 1. 计算 Alpha 因子 (从 0.0 到 1.0)
-                        # i 越小（越旧），alpha 越低，线条越透明
+                        # 1. Calculate Alpha factor (from 0.0 to 1.0)
+                        # The smaller i (older), the lower alpha, making lines more transparent
                         alpha_factor = 1 - i / num_history_steps
                         
-                        # 2. 获取原始 RGB
-                        rgb_cols = h_col[keep_mask] # 形状 (M, 2, 3)
+                        # 2. Get original RGB
+                        rgb_cols = h_col[keep_mask] # Shape (M, 2, 3)
                         if rgb_cols.shape[0] > 1:
                             faded_col = fade_color_saturation(rgb_cols, alpha_factor)
                         else:
                             faded_col = rgb_cols
-                        # 拼接成 (M, 2, 4)
+                        # Concatenate to (M, 2, 4)
                         rgba_cols = faded_col
                         
                         render_pos_list.append(h_pos[keep_mask])

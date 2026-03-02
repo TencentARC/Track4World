@@ -1,18 +1,34 @@
-# **Track4World: Feedforward World-centric Dense 3D Tracking of All Pixels**
+<div align="center">
+<img src='assets/logo.jpg' style="height:100px"></img>
+</div>
+
+<h3 align="center"><strong>Track4World: Feedforward World-centric Dense 3D Tracking of All Pixels</strong></h3>
+<p align="center">
+  <a href="https://github.com/jiah-cloud">Jiahao Lu</a><sup>1</sup>,</span>
+  <a href="https://openreview.net/profile?id=~Jiayi_Xu10">Jiayi Xu</a><sup>1</sup>,</span>
+  <a href="https://wbhu.github.io/">Wenbo Hu</a><sup>2†</sup>,</span>
+  <a href="https://ruijiezhu94.github.io/ruijiezhu/">Ruijie Zhu</a><sup>2</sup>,</span>
+  <a href="https://afterjourney00.github.io/">Chengfeng Zhao</a><sup>1</sup>,</span><br>
+  <a href="https://saikit.org/index.html">Sai-Kit Yeung</a><sup>1</sup>,</span>
+  <a href="https://scholar.google.com/citations?user=4oXBp9UAAAAJ&hl=en">Ying Shan</a><sup>2</sup>,</span>
+  <a href="https://liuyuan-pal.github.io/">Yuan Liu</a><sup>1†</sup>
+  <br>
+  <sup>1</sup> HKUST </span> 
+  <sup>2</sup> ARC Lab, Tencent PCG </span>
+  <br>
+</p>
 
 <div align="center">
-
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
-[![arXiv](https://img.shields.io/badge/arXiv-2412.03079-b31b1b.svg)](https://arxiv.org/abs/2412.03079)
-[![Project Page](https://img.shields.io/badge/Project-Page-Green)](https://igl-hkust.github.io/TrackingWorld.github.io/)
-
-**Authors**
-`<br>`
-[Jiahao Lu](https://github.com/jiah-cloud)`<sup>`1`</sup>`  •  [Jiayi Xu](https://openreview.net/profile?id=~Jiayi_Xu10)`<sup>`1`</sup>`  •  [Wenbo Hu](https://wbhu.github.io/)`<sup>`2†`</sup>`  •  [Ruijie Zhu](https://ruijiezhu94.github.io/ruijiezhu/)`<sup>`2`</sup>`  •  [Chengfeng Zhao](https://afterjourney00.github.io/)`<sup>`1`</sup>`
-`<br>`
-[Sai-Kit Yeung](https://saikit.org/index.html)`<sup>`1`</sup>`  •  [Ying Shan](https://scholar.google.com/citations?user=4oXBp9UAAAAJ&hl=en)`<sup>`2`</sup>`  •  [Yuan Liu](https://liuyuan-pal.github.io/)`<sup>`1†`</sup>`
-
+  <a href='https://arxiv.org/abs/2602.08961'><img src='https://img.shields.io/badge/arXiv-2602.08961-b31b1b.svg'></a> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href='https://ruijiezhu94.github.io/MotionCrafter_Page/'><img src='https://img.shields.io/badge/Project-Page-orange'></a> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href='https://huggingface.co/TencentARC/Track4World'><img src='https://img.shields.io/badge/HuggingFace-Weights-yellow'></a> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
+  <a href='https://huggingface.co/TencentARC/Track4World/blob/main/LICENSE.txt'><img src='https://img.shields.io/badge/License-Tencent-green'></a> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <br>
+  <br>
 </div>
+
+
+
 
 ---
 
