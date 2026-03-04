@@ -19,7 +19,7 @@
 </p>
 
 <div align="center">
-  <a href='https://arxiv.org/abs/2602.08961'><img src='https://img.shields.io/badge/arXiv-2602.08961-b31b1b.svg'></a> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href='https://arxiv.org/abs/2603.02573'><img src='https://img.shields.io/badge/arXiv-2603.02573-b31b1b.svg'></a> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <a href='assets/arxiv_Track4World.pdf'><img src='https://img.shields.io/badge/Paper-PDF-red'></a> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <a href='https://jiah-cloud.github.io/Track4World.github.io/'><img src='https://img.shields.io/badge/Project-Page-orange'></a> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <a href='https://huggingface.co/TencentARC/Track4World'><img src='https://img.shields.io/badge/HuggingFace-Weights-yellow'></a> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 
