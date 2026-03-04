@@ -7,7 +7,7 @@ To reproduce the results reported in our paper, please follow the steps below.
 **Step 1: General Evaluation Datasets**
 Download the main evaluation datasets and unzip them into the project directory.
 
-[**📥 Download Evaluation Datasets**](https://huggingface.co/TencentARC/Track4World/tree/main/evaluation_datasets.zip)
+[**📥 Download Evaluation Datasets**](https://huggingface.co/TencentARC/Track4World/resolve/main/evaluation_datasets.zip)
 
 **Step 2: 2D Tracking Datasets (TAP-Vid)**
 For 2D tracking benchmarks, please refer to the [**DeepMind TAP-Vid repository**](https://github.com/google-deepmind/tapnet/tree/main/tapnet/tapvid) for instructions on downloading and processing the data (`kinetics`, `rgb_stacking`, `robotap`).
