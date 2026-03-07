@@ -311,7 +311,6 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
     logger.info(f"Selected {T_selected} frames from {T_full} for 3D Pair inference.")
 
     # Create 2D grid coordinates for flow calculation
-    # 【修復 2】替換硬編碼的 'cuda:0' 為動態 device
     grid_xy = track4world.utils.basic.gridcloud2d(
         1, H, W, norm=False, device=device
     ).float() 
@@ -410,7 +409,7 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
     )
 
     # shutil.rmtree(temp_dir, ignore_errors=True) 
-    return None
+    return select_views
 
 
 def forward_video3d_pair(rgbs: torch.Tensor, model: torch.nn.Module, args) -> Dict:
@@ -1008,7 +1007,7 @@ def run_demo(model, args):
         with torch.autocast(device_type='cuda', dtype=torch.float16):
             if args.mode == '2d':
                 logger.info("--- Running 2D Tracking Mode ---")
-                forward_video(rgbs_tensor.cuda(), framerate, model, args)
+                select_views = forward_video(rgbs_tensor.cuda(), framerate, model, args)
             
             elif args.mode == '3d_efep':
                 logger.info("--- Running 3D Pair Mode (Every Frame Every Pixel) ---")
