@@ -224,10 +224,10 @@ If you find **Track4World** useful for your research or applications, please con
 
 ```bibtex
 @article{lu2026track4world,
-  title   = {Track4World: Feedforward World-Centric Dense 3D Tracking of All Pixels},
-  author  = {Jiahao Lu and Jiayi Xu and Wenbo Hu and Ruijie Zhu and Chengfeng Zhao and Sai-Kit Yeung and Ying Shan and Yuan Liu},
-  journal = {arXiv preprint arXiv:2603.02573},
-  year    = {2026}
+  title={Track4World: Feedforward World-centric Dense 3D Tracking of All Pixels},
+  author={Lu, Jiahao and Xu, Jiayi and Hu, Wenbo and Zhu, Ruijie and Zhao, Chengfeng and Yeung, Sai-Kit and Shan, Ying and Liu, Yuan},
+  journal={arXiv preprint arXiv:2603.02573},
+  year={2026}
 }
 ```
 
