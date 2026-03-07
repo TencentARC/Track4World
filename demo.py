@@ -294,14 +294,26 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
     """
     Runs 2D tracking inference and generates a visualization video.
     """
-    B, T, C, H, W = rgbs.shape
+    B, T_full, C, H, W = rgbs.shape
     assert C == 3 and B == 1
+    
     device = rgbs.device
 
+    # Select frames (e.g., every 5th frame)
+    if args.Ts == -1:
+        select_views = range(0, T_full, 1)
+    else:
+        select_views = range(0, min(args.Ts, T_full), 1)
+    
+    select_views = list(select_views)
+    rgbs = rgbs[:, select_views]
+    T_selected = len(select_views)
+    logger.info(f"Selected {T_selected} frames from {T_full} for 3D Pair inference.")
+
     # Create 2D grid coordinates for flow calculation
-    # Shape: 1, H*W, 2
+    # 【修復 2】替換硬編碼的 'cuda:0' 為動態 device
     grid_xy = track4world.utils.basic.gridcloud2d(
-        1, H, W, norm=False, device='cuda:0'
+        1, H, W, norm=False, device=device
     ).float() 
     grid_xy = grid_xy.permute(0, 2, 1).reshape(1, 1, 2, H, W) # 1, 1, 2, H, W
 
@@ -309,7 +321,7 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
     logger.info('Starting 2D forward pass...')
     f_start_time = time.time()
 
-    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+    with torch.autocast(device_type=device.type if device.type != 'cpu' else 'cuda', dtype=torch.float16):
         # 1. Forward tracking (Time t -> t+n)
         flows_e, visconf_maps_e, _, _, _ = model.forward_sliding(
             rgbs[:, args.query_frame:], 
@@ -318,7 +330,7 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
             is_training=False
         )
 
-        traj_maps_e = flows_e.to(torch.float32).cuda() + grid_xy
+        traj_maps_e = flows_e.to(torch.float32).to(device) + grid_xy
         visconf_maps_e = visconf_maps_e.to(torch.float32)
 
         # 2. Backward tracking (Time t -> 0) if query_frame is not the start
@@ -329,52 +341,45 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
                 sw=None,
                 is_training=False
             )
-            backward_traj_maps_e = backward_flows_e.to(torch.float32).cuda() + grid_xy
+            backward_traj_maps_e = backward_flows_e.to(torch.float32).to(device) + grid_xy
             
             # Flip back to chronological order
             backward_traj_maps_e = backward_traj_maps_e.flip([1])[:, :-1]
-            backward_visconf_maps_e = backward_visconf_maps_e.flip([1])[:, :-1]
+            backward_visconf_maps_e = backward_visconf_maps_e.to(torch.float32).flip([1])[:, :-1]
 
             # Merge trajectories
             traj_maps_e = torch.cat([backward_traj_maps_e, traj_maps_e], dim=1)
-            visconf_maps_e = torch.cat(
-                [backward_visconf_maps_e, visconf_maps_e], dim=1
-            ).to(torch.float32)
+            visconf_maps_e = torch.cat([backward_visconf_maps_e, visconf_maps_e], dim=1)
             
     ftime = time.time() - f_start_time
+    
     logger.info(
-        f'Forward pass finished; {ftime:.2f}s / {T} frames; '
-        f'{round(T / ftime)} FPS'
+        f'Forward pass finished; {ftime:.2f}s / {T_selected} frames; '
+        f'{round(T_selected / ftime)} FPS'
     )
     
     # 3. Visualization Preparation
     rate = args.rate
     # Subsample trajectories for visualization
-    trajs_e = traj_maps_e[:, :, :, ::rate, ::rate].reshape(B, T, 2, -1)
+    trajs_e = traj_maps_e[:, :, :, ::rate, ::rate].reshape(B, T_selected, 2, -1)
     trajs_e = trajs_e.permute(0, 1, 3, 2)  # B, T, N, 2
     
-    visconfs_e = visconf_maps_e[:, :, :, ::rate, ::rate].reshape(B, T, 2, -1)
+    visconfs_e = visconf_maps_e[:, :, :, ::rate, ::rate].reshape(B, T_selected, 2, -1)
     visconfs_e = visconfs_e.permute(0, 1, 3, 2)  # B, T, N, 2
 
-    xy0 = trajs_e[0, 0].cpu().numpy()
+    xy0 = trajs_e[0, args.query_frame].cpu().numpy()
     colors = track4world.utils.improc.get_2d_colors(xy0, H, W)
 
     fn = os.path.basename(args.mp4_path).split('.')[0]
-    rgb_out_f = os.path.join(
-        args.save_base_dir, 
-        f"{args.mode}_output", 
-        f"pt_vis_{fn}_rate{rate}_q{args.query_frame}.mp4"
-    )
-    temp_dir = os.path.join(
-        args.save_base_dir, 
-        f"{args.mode}_output", 
-        f"temp_pt_vis_{fn}_rate{rate}_q{args.query_frame}"
-    )
+    out_dir = os.path.join(args.save_base_dir, f"{args.mode}_output")
+    rgb_out_f = os.path.join(out_dir, f"pt_vis_{fn}_rate{rate}_q{args.query_frame}.mp4")
+    temp_dir = os.path.join(out_dir, f"temp_pt_vis_{fn}_rate{rate}_q{args.query_frame}")
+    
     track4world.utils.basic.mkdir(temp_dir)
 
     # Draw frames
     frames = draw_pts_gpu(
-        rgbs[0].to('cuda:0'), 
+        rgbs[0].to(device), 
         trajs_e[0], 
         visconfs_e[0, :, :, 1] > args.conf_thr,
         colors, 
@@ -383,18 +388,16 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
     )
 
     # Stack Input and Output frames for comparison
-    if args.vstack:
-        frames_input = rgbs[0].clamp(0, 255).byte()
-        frames_input = frames_input.permute(0, 2, 3, 1).cpu().numpy()
-        frames = np.concatenate([frames_input, frames], axis=1)
-    elif args.hstack:
-        frames_input = rgbs[0].clamp(0, 255).byte()
-        frames_input = frames_input.permute(0, 2, 3, 1).cpu().numpy()
-        frames = np.concatenate([frames_input, frames], axis=2)
+    if args.vstack or args.hstack:
+        frames_input = rgbs[0].clamp(0, 255).byte().permute(0, 2, 3, 1).cpu().numpy()
+        if args.vstack:
+            frames = np.concatenate([frames_input, frames], axis=1) 
+        elif args.hstack:
+            frames = np.concatenate([frames_input, frames], axis=2) 
     
     # 4. Save frames and generate MP4
     logger.info('Writing frames to disk...')
-    for ti in range(T):
+    for ti in range(T_selected):
         temp_out_f = f'{temp_dir}/{ti:03d}.jpg'
         im = PIL.Image.fromarray(frames[ti])
         im.save(temp_out_f)
@@ -403,7 +406,7 @@ def forward_video(rgbs: torch.Tensor, framerate: int, model: torch.nn.Module, ar
     os.system(
         f'ffmpeg -y -hide_banner -loglevel error -f image2 -framerate {framerate} '
         f'-pattern_type glob -i "./{temp_dir}/*.jpg" -c:v libx264 -crf 20 '
-        f'-pix_fmt yuv420p {rgb_out_f}'
+        f'-pix_fmt yuv420p "{rgb_out_f}"'
     )
 
     # shutil.rmtree(temp_dir, ignore_errors=True) 
