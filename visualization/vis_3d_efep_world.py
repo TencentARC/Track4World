@@ -11,7 +11,8 @@ from tqdm.auto import tqdm
 from vis_3d_efep import (
     remove_std_outlier_open3d, 
     process_trajectories, 
-    fill_trajectory_gaps
+    fill_trajectory_gaps,
+    smooth_trajectories_temporal
 )
 from scipy.ndimage import gaussian_filter1d
 from scipy.spatial.transform import Rotation as R
@@ -155,61 +156,6 @@ def smooth_c2w(c2w,
     c2w_smooth[:, :3, 3] = smooth_t
     
     return c2w_smooth
-
-def smooth_trajectories_temporal(trajs, mask, sigma=2.0):
-    """
-    Smooth trajectories in the temporal dimension using Gaussian filtering for extremely high smoothness.
-    
-    Args:
-        trajs: (T, N, 3) Trajectory data
-        mask: (T, N) Visibility mask
-        sigma: Smoothing strength.
-               sigma=1.0: Slight smoothing
-               sigma=2.0-3.0: Very smooth (recommended)
-               sigma=5.0+: Extremely smooth (may cause "corner cutting" in fast turns)
-    """
-    print(f"Smoothing point trajectories (Gaussian, sigma={sigma})...")
-    T, N, D = trajs.shape
-    smoothed_trajs = trajs.copy()
-    
-    # Define minimum segment length, segments shorter than this are not smoothed (to avoid overfitting noise)
-    min_segment_len = max(int(sigma * 3), 5) 
-
-    for i in tqdm(range(N), desc="Smoothing Trajectories"):
-        # 1. Get all valid frame indices for the current point
-        valid_indices = np.where(mask[:, i])[0]
-        
-        if len(valid_indices) == 0:
-            continue
-            
-        # 2. Identify continuous segments (Split into continuous segments)
-        # If index jump is greater than 1, it means there is a gap in between
-        # For example: [1, 2, 3, 10, 11, 12] -> [1, 2, 3] and [10, 11, 12]
-        splits = np.where(np.diff(valid_indices) > 1)[0] + 1
-        segments = np.split(valid_indices, splits)
-        
-        for seg_idx in segments:
-            # If segment is too short, Gaussian filtering is meaningless, skip
-            if len(seg_idx) < min_segment_len:
-                continue
-            
-            # 3. Extract 3D data for this segment (L, 3)
-            raw_data = trajs[seg_idx, i, :]
-            
-            # 4. Apply Gaussian filtering
-            # axis=0 means smooth along the time axis
-            # mode='nearest' makes the boundary transition smooth, won't diverge
-            smooth_data = gaussian_filter1d(
-                raw_data, 
-                sigma=sigma, 
-                axis=0, 
-                mode='nearest'
-            )
-            
-            # 5. Write back the results
-            smoothed_trajs[seg_idx, i, :] = smooth_data
-            
-    return smoothed_trajs
 
 def cam_points_to_world(points_cam, c2w):
     N = points_cam.shape[0]
@@ -595,6 +541,7 @@ def main(
                     dynamic_colors_original[t_curr], 
                     gui_dyn_saturation.value
                 )
+                
     line_node = server.scene.add_line_segments(
         name="/trajectories",
         points=np.zeros((0, 2, 3)),
