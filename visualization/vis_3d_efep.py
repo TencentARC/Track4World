@@ -6,9 +6,12 @@ from typing import Tuple, List, Optional
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import open3d as o3d
 import viser
 from tqdm.auto import tqdm
+from scipy.ndimage import gaussian_filter1d
+
 # Try importing faiss for GPU acceleration, fallback if not available
 try:
     import faiss
@@ -20,11 +23,67 @@ except ImportError:
 # Global Constants
 # Sampling rate: Downsample points to maintain performance during visualization.
 DEFAULT_POINT_DOWNSAMPLE_RATE = 10
-MAX_DISPLACEMENT = 1.0
+MAX_DISPLACEMENT = 5.0
 
 # ==============================================================================
 # Helper Functions
 # ==============================================================================
+
+def smooth_trajectories_temporal(trajs, mask, sigma=2.0):
+    """
+    Smooth trajectories in the temporal dimension using Gaussian filtering for extremely high smoothness.
+    
+    Args:
+        trajs: (T, N, 3) Trajectory data
+        mask: (T, N) Visibility mask
+        sigma: Smoothing strength.
+               sigma=1.0: Slight smoothing
+               sigma=2.0-3.0: Very smooth (recommended)
+               sigma=5.0+: Extremely smooth (may cause "corner cutting" in fast turns)
+    """
+    print(f"Smoothing point trajectories (Gaussian, sigma={sigma})...")
+    T, N, D = trajs.shape
+    smoothed_trajs = trajs.copy()
+    
+    # Define minimum segment length, segments shorter than this are not smoothed (to avoid overfitting noise)
+    min_segment_len = max(int(sigma * 3), 5) 
+
+    for i in tqdm(range(N), desc="Smoothing Trajectories"):
+        # 1. Get all valid frame indices for the current point
+        valid_indices = np.where(mask[:, i])[0]
+        
+        if len(valid_indices) == 0:
+            continue
+            
+        # 2. Identify continuous segments (Split into continuous segments)
+        # If index jump is greater than 1, it means there is a gap in between
+        # For example: [1, 2, 3, 10, 11, 12] -> [1, 2, 3] and [10, 11, 12]
+        splits = np.where(np.diff(valid_indices) > 1)[0] + 1
+        segments = np.split(valid_indices, splits)
+        
+        for seg_idx in segments:
+            # If segment is too short, Gaussian filtering is meaningless, skip
+            if len(seg_idx) < min_segment_len:
+                continue
+            
+            # 3. Extract 3D data for this segment (L, 3)
+            raw_data = trajs[seg_idx, i, :]
+            
+            # 4. Apply Gaussian filtering
+            # axis=0 means smooth along the time axis
+            # mode='nearest' makes the boundary transition smooth, won't diverge
+            smooth_data = gaussian_filter1d(
+                raw_data, 
+                sigma=sigma, 
+                axis=0, 
+                mode='nearest'
+            )
+            
+            # 5. Write back the results
+            smoothed_trajs[seg_idx, i, :] = smooth_data
+            
+    return smoothed_trajs
+
 def process_trajectories(
     trajectories_3d, 
     visibility_mask, 
@@ -37,95 +96,43 @@ def process_trajectories(
     """
     Filter unstable 3D trajectories based on visibility continuity, motion jumps,
     and smoothness constraints, and optionally prepare them for smoothing.
-
-    Args:
-        trajectories_3d (np.ndarray): 3D trajectories of shape (T, N, 3),
-            where T is the number of frames and N is the number of trajectories.
-        visibility_mask (np.ndarray): Boolean visibility mask of shape (T, N),
-            indicating whether each trajectory is visible at each frame.
-        traj_dyn_mask_raw (np.ndarray): Raw dynamic/static mask associated with
-            each trajectory, shape (T, N).
-        k_consecutive (int): Minimum number of consecutive visible frames required
-            to keep a trajectory.
-        jump_threshold (float): Velocity magnitude threshold for detecting sudden
-            motion jumps.
-        acc_threshold (float): Acceleration magnitude threshold for detecting
-            jittery or non-smooth trajectories.
-        smooth_sigma (float): Standard deviation for optional Gaussian smoothing
-            (currently not applied).
-
-    Returns:
-        trajectories_3d (np.ndarray): Filtered 3D trajectories.
-        visibility_mask (np.ndarray): Corresponding filtered visibility mask.
-        traj_dyn_mask_raw (np.ndarray): Corresponding filtered dynamic mask.
     """
     T, N, _ = trajectories_3d.shape
 
-    # ==========================================================
     # 1. Consecutive Visibility Filtering
-    # ==========================================================
     mask_int = visibility_mask.astype(np.int32)
-
-    # Use cumulative sum to efficiently compute the number of visible frames
-    # within a sliding window of length k_consecutive
     cumsum_mask = np.cumsum(
         np.vstack([np.zeros((1, N)), mask_int]), axis=0
     )
     window_sums = cumsum_mask[k_consecutive:] - cumsum_mask[:-k_consecutive]
-    # A trajectory is valid if there exists at least one window where all
-    # k_consecutive frames are visible
     valid_length_mask = np.any(window_sums == k_consecutive, axis=0)
 
-    # ==========================================================
     # 2. Motion Jump Filtering (Velocity Check)
-    # ==========================================================
-    # First-order temporal difference as a proxy for velocity
-    # The factor 100 is kept from the original implementation
-    # (assumed to be a unit scaling)
     velocities = 100 * (trajectories_3d[1:] - trajectories_3d[:-1])
     vel_norms = np.linalg.norm(velocities, axis=2)
 
-    # Only check velocity jumps when the trajectory is visible
-    # in both consecutive frames
     valid_consecutive_frames = visibility_mask[1:] & visibility_mask[:-1]
-
-    # A trajectory is considered to have jumps if any velocity magnitude
-    # exceeds the threshold in visible regions
     has_jumps = np.any(
         (vel_norms > jump_threshold) & valid_consecutive_frames,
         axis=0
     )
 
-    # ==========================================================
     # 3. Smoothness / Jitter Filtering (Acceleration Check)
-    # ==========================================================
-    # Second-order temporal difference as a proxy for acceleration
     accelerations = velocities[1:] - velocities[:-1]
     acc_norms = np.linalg.norm(accelerations, axis=2)
 
-    # Only evaluate acceleration when the trajectory is visible
-    # for three consecutive frames
     valid_acc_frames = (
         visibility_mask[2:] &
         visibility_mask[1:-1] &
         visibility_mask[:-2]
     )
 
-    # Debug: report maximum acceleration observed in valid regions
-    print(acc_norms[valid_acc_frames].max())
-
-    # A trajectory is considered jittery if any acceleration magnitude
-    # exceeds the threshold in valid regions
     is_jittery = np.any(
         (acc_norms > acc_threshold) & valid_acc_frames,
         axis=0
     )
 
-    # ==========================================================
     # 4. Final Filtering and Application
-    # ==========================================================
-    # Keep trajectories that satisfy all conditions:
-    # sufficient visibility length, no large jumps, and smooth motion
     final_keep_mask = (
         valid_length_mask &
         (~has_jumps) &
@@ -140,80 +147,40 @@ def process_trajectories(
             traj_dyn_mask_raw[:, []]
         )
 
-    # Apply the final mask
     trajectories_3d = trajectories_3d[:, final_keep_mask]
     visibility_mask = visibility_mask[:, final_keep_mask]
     traj_dyn_mask_raw = traj_dyn_mask_raw[:, final_keep_mask]
-
-    # Optional post-smoothing (currently disabled)
-    # trajectories_3d = gaussian_filter1d(
-    #     trajectories_3d, sigma=smooth_sigma, axis=0
-    # )
 
     return trajectories_3d, visibility_mask, traj_dyn_mask_raw
 
 def fill_trajectory_gaps(trajectories, mask, max_gap=3):
     """
     Linearly interpolate short missing segments in trajectories.
-
-    This function fills short temporal gaps (up to `max_gap` frames)
-    in object trajectories caused by occlusions, tracking failures,
-    or detection flickering.
-
-    Args:
-        trajectories (np.ndarray):
-            Trajectory array of shape (T, N, D), where:
-            - T is the number of frames,
-            - N is the number of trajectories,
-            - D is the spatial dimension (e.g., 2D or 3D coordinates).
-
-        mask (np.ndarray):
-            Boolean visibility mask of shape (T, N), where True indicates
-            the trajectory is valid/visible at the corresponding frame.
-
-        max_gap (int):
-            Maximum allowed length (in frames) of a missing segment to be
-            filled by linear interpolation. Longer gaps are ignored.
-
-    Returns:
-        filled_trajectories (np.ndarray):
-            Trajectory array with short gaps filled via linear interpolation.
-
-        filled_mask (np.ndarray):
-            Updated visibility mask with interpolated frames marked as visible.
     """
     T, N, _ = trajectories.shape
     filled_trajectories = trajectories.copy()
     filled_mask = mask.copy()
 
     for i in tqdm(range(N), desc="Filling gaps"):
-        # Indices of frames where the current trajectory is visible
         valid_indices = np.where(mask[:, i])[0]
         
-        # Skip trajectories with fewer than two valid observations
         if len(valid_indices) < 2:
             continue
 
-        # Temporal differences between consecutive valid frames
         diffs = valid_indices[1:] - valid_indices[:-1]
-        
-        # Identify short gaps: missing frames between two valid observations
-        # whose length does not exceed `max_gap`
         gap_indices = np.where((diffs > 1) & (diffs <= max_gap + 1))[0]
 
         for gap_idx in gap_indices:
             start_t = valid_indices[gap_idx]
             end_t = valid_indices[gap_idx + 1]
             
-            # Start and end positions of the gap
             p_start = filled_trajectories[start_t, i]
             p_end = filled_trajectories[end_t, i]
 
-            # Linearly interpolate intermediate frames
             for t in range(start_t + 1, end_t):
                 alpha = (t - start_t) / (end_t - start_t)
                 filled_trajectories[t, i] = (1 - alpha) * p_start + alpha * p_end
-                filled_mask[t, i] = True  # Mark interpolated frames as visible
+                filled_mask[t, i] = True 
 
     return filled_trajectories, filled_mask
 
@@ -221,92 +188,43 @@ def remove_radius_outlier_gpu(points: np.ndarray,
     nb_points: int = 40, 
     radius: float = 0.01
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Removes outliers using GPU-accelerated Faiss (K-Nearest Neighbors).
-    
-    Args:
-        points: Input point cloud data (N, 3).
-        nb_points: Number of neighbors to check.
-        radius: Search radius.
-        
-    Returns:
-        Tuple containing filtered points and indices of kept points.
-    """
+    """Removes outliers using GPU-accelerated Faiss (K-Nearest Neighbors)."""
     if not HAS_FAISS:
         raise RuntimeError("Faiss is not installed.")
         
     points_torch = torch.from_numpy(points).float().cuda()
     n, d = points_torch.shape
     
-    # Initialize Faiss GPU resources
     res = faiss.StandardGpuResources()
     index = faiss.IndexFlatL2(d)
     gpu_index = faiss.index_cpu_to_gpu(res, 0, index)
     
-    # Add points and search
-    gpu_index.add(points) # Note: Faiss handles numpy/torch conversion usually
+    gpu_index.add(points) 
     D, I = gpu_index.search(points, nb_points)
     
-    # Filter based on radius (D is squared L2 distance)
     mask = D[:, -1] < radius**2
-    
     return points[mask].cpu().numpy(), np.nonzero(mask.cpu().numpy())[0]
-
 
 def remove_radius_outlier_open3d(points: np.ndarray, 
     nb_points: int = 20, 
     radius: float = 0.001
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Removes outliers using Open3D (CPU implementation).
-    
-    Args:
-        points: Input point cloud data (N, 3).
-        nb_points: Number of neighbors to check.
-        radius: Search radius.
-        
-    Returns:
-        Tuple containing filtered points and indices of kept points.
-    """
-    # 1. Convert numpy array to Open3D PointCloud
+    """Removes outliers using Open3D (CPU implementation)."""
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
-    
-    # 2. Call Open3D's efficient C++ implementation
-    #    Returns: (filtered_pcd, indices_list)
     pcd_filtered, ind = pcd.remove_radius_outlier(nb_points=nb_points, radius=radius)
-    
-    # 3. Convert back to numpy
     points_filtered = np.asarray(pcd_filtered.points)
-    
     return points_filtered, np.array(ind)
 
 def remove_std_outlier_open3d(points: np.ndarray, 
     nb_neighbors: int = 30, 
     std_ratio: float = 2.0
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Removes outliers using Open3D (CPU implementation).
-    
-    Args:
-        points: Input point cloud data (N, 3).
-        nb_points: Number of neighbors to check.
-        radius: Search radius.
-        
-    Returns:
-        Tuple containing filtered points and indices of kept points.
-    """
-    # 1. Convert numpy array to Open3D PointCloud
+    """Removes outliers using Open3D (CPU implementation)."""
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
-    
-    # 2. Call Open3D's efficient C++ implementation
-    #    Returns: (filtered_pcd, indices_list)
     pcd_filtered, ind = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
-    
-    # 3. Convert back to numpy
     points_filtered = np.asarray(pcd_filtered.points)
-    
     return points_filtered, np.array(ind)
 
 # ==============================================================================
@@ -335,8 +253,7 @@ def main(
         server.request_share_url()
 
     # --- Load File Paths ---
-    # Sort files by frame number
-    ply_files = sorted([f for f in ply_dir.glob("frame_*.ply")], key=lambda x: int(x.stem.split("_")[-1]))#[:-1]
+    ply_files = sorted([f for f in ply_dir.glob("frame_*.ply")], key=lambda x: int(x.stem.split("_")[-1]))
     
     num_frames = min(max_frames, len(ply_files))
     if num_frames == 0:
@@ -358,20 +275,15 @@ def main(
     for i, ply_file in enumerate(tqdm(ply_files[:num_frames], desc="Loading point clouds")):
         pcd = o3d.io.read_point_cloud(str(ply_file))
         
-        # Basic cleanup
-        # _, ind = pcd.remove_radius_outlier(nb_points=10, radius=0.001)
-        # Scale and flip coordinates
         points_all = 100 * np.asarray(pcd.points)
         colors_all = np.asarray(pcd.colors)
 
-        # Initialize colors based on the first frame (Logic from original code)
         if i == 0:
             num_tracks = colors_all.shape[0]
             track_colors = plt.cm.get_cmap('hsv', num_tracks)
             colors_track = track_colors(np.arange(num_tracks))[:, :3]
             initial_colors = (colors_track * 255).astype(np.uint8)
 
-        # Add to Viser scene (initially hidden except frame 0)
         point_nodes.append(
             server.scene.add_point_cloud(
                 name=f"/frames/t{i}/point_cloud",
@@ -384,13 +296,13 @@ def main(
         )
 
     # --- Process Trajectory Data ---
-    # Use the raw loaded trajectory data
     trajectories_3d = trajectory_all_raw.copy()
-    
-    # Create visibility mask (True where data is not NaN)
     visibility_mask = ~np.isnan(trajectory_all_raw).any(axis=-1)  # [T, N]
 
-    # Filter trajectories using radius outlier removal
+    trajectories_3d, visibility_mask, _ = process_trajectories(
+        trajectories_3d, visibility_mask, visibility_mask, 
+        k_consecutive=5, jump_threshold=8, acc_threshold=6
+    )
     print("Filtering trajectories...")
     for i in tqdm(range(trajectories_3d.shape[0])):
         pts = trajectories_3d[i][visibility_mask[i]]
@@ -399,7 +311,6 @@ def main(
             
         _, ind = remove_std_outlier_open3d(pts)
         
-        # Update mask based on inliers
         mask = visibility_mask[i].copy()
         valid_indices = np.where(mask)[0]
         new_mask = np.zeros_like(mask, dtype=bool)
@@ -411,15 +322,24 @@ def main(
     # Apply initial downsampling
     trajectories_3d = trajectories_3d[:, ::DEFAULT_POINT_DOWNSAMPLE_RATE]
     visibility_mask = visibility_mask[:, ::DEFAULT_POINT_DOWNSAMPLE_RATE]
+    
+    # 1. Fill short-term breakpoints
     trajectories_3d, visibility_mask = fill_trajectory_gaps(
         trajectories_3d, 
         visibility_mask, 
         max_gap=5  
     )
+    
+    # 2. [New] Temporal Gaussian smoothing to make trajectories smooth like a ribbon
+    trajectories_3d = smooth_trajectories_temporal(
+        trajectories_3d, 
+        visibility_mask, 
+        sigma=3.0 
+    )
+    
     T, N, _ = trajectories_3d.shape
 
     # --- Compute Trajectory Colors ---
-    # Determine color based on the position at the first visible frame
     first_visible_idx = np.argmax(visibility_mask, axis=0)
     never_visible = ~np.any(visibility_mask, axis=0)
     first_visible_idx[never_visible] = 0
@@ -428,7 +348,6 @@ def main(
     first_visible_xyz = trajectories_3d[first_visible_idx, indices]
     first_visible_xyz[never_visible] = np.nan
     
-    # Normalize positions for color mapping
     xyz_min = np.nanmin(first_visible_xyz, axis=0)
     xyz_max = np.nanmax(first_visible_xyz, axis=0)
     xyz_norm = (first_visible_xyz - xyz_min) / (xyz_max - xyz_min + 1e-6)
@@ -438,54 +357,35 @@ def main(
     
     sort_idx = np.argsort(scalar)
     colors_hsv = plt.cm.hsv(np.linspace(0, 1, N))[:, :3]
-    
-    # Assign colors sorted by spatial position
     initial_colors = (colors_hsv[np.argsort(sort_idx)] * 255).astype(np.uint8)
 
     # --- GUI Controls ---
     with server.gui.add_folder("Playback"):
-        # --- Appearance ---
-        # Fine-grained control for point cloud density
         gui_point_size = server.gui.add_slider(
             "Point size", min=0.00001, max=2, step=1e-3, initial_value=0.008
         )
-        # Thickness for rendered trajectory lines
         gui_line_width = server.gui.add_slider(
             "Line width", min=0.01, max=10, step=0.01, initial_value=0.3
         )
-        
-        # --- Playback Logic ---
-        # The slider is disabled by default to prevent conflicts with the 'Playing' loop
         gui_timestep = server.gui.add_slider(
             "Timestep", min=0, max=num_frames - 1, step=1, initial_value=0, disabled=True
         )
-        gui_playing = server.gui.add_checkbox("Playing", False)
+        gui_playing = server.gui.add_checkbox("Playing", True)
         gui_framerate = server.gui.add_slider(
             "FPS", min=1, max=60, step=0.1, initial_value=24
         )
-        
-        # --- Trajectory & Optimization Settings ---
         gui_show_trajectories = server.gui.add_checkbox("Show Trajectories", True)
-        
-        # How many past/future frames to link together in a line
         gui_max_traj_length = server.gui.add_slider(
-            "Max trajectory length", min=1, max=200, step=1, initial_value=5
+            "Max trajectory length", min=1, max=200, step=1, initial_value=10
         )
-        
-        # Optimization: Renders every N-th point to maintain high FPS
         gui_downsample = server.gui.add_slider(
             "Downsample rate", min=1, max=500, step=1, 
             initial_value=DEFAULT_POINT_DOWNSAMPLE_RATE
         )
-        
-        # Threshold to filter out stationary points or extreme outliers
         gui_max_displacement = server.gui.add_slider(
             "Displacement value", min=0.01, max=100, step=0.01, 
             initial_value=MAX_DISPLACEMENT
         )
-
-        # --- Visualization Mode ---
-        # Switch between raw points, motion paths, or a hybrid view
         gui_vis_mode = server.gui.add_button_group(
             "Visualization Mode", ("PointCloud", "Tracking", "Both")
         )
@@ -494,25 +394,19 @@ def main(
     # --- Trajectory Line Node Initialization ---
     line_node = server.scene.add_line_segments(
         name="/trajectories",
-        points=np.zeros((1, 2, 3)),  # Start with 1 empty segment to avoid errors
+        points=np.zeros((1, 2, 3)), 
         colors=np.zeros((1, 2, 3), dtype=np.uint8),
         line_width=gui_line_width.value,
         visible=True,
     )
 
     # --- Visualization Logic ---
-
     def apply_vis_mode(mode: str, timestep: int):
-        """
-        Updates visibility of point clouds and lines based on the selected mode.
-        """
         if mode == "PointCloud":
-            # Show only current frame's point cloud
             for i, node in enumerate(point_nodes):
                 node.visible = (i == timestep)
             line_node.visible = False
         elif mode == "Tracking":
-            # Hide all point clouds, show trajectory lines
             for node in point_nodes:
                 node.visible = False
             line_node.visible = True
@@ -521,13 +415,11 @@ def main(
                 node.visible = (i == timestep)
             line_node.visible = True
 
-    # Initial application of visualization mode
     try:
         apply_vis_mode(gui_vis_mode.value, gui_timestep.value)
     except Exception:
         pass
 
-    # Callback for mode change (if supported by Viser version)
     try:
         @gui_vis_mode.on_update
         def _(_):
@@ -536,69 +428,96 @@ def main(
         pass
 
     # --- Trajectory Update Logic ---
-    
-    # History buffers for the trail effect
-    all_line_positions = []
-    all_line_colors = []
+    # Use history buffers with strict tracking IDs to avoid connecting wrong lines due to point flickering
+    live_history_pos = []
+    live_history_col = []
+    live_history_ind = []
 
-    def update_trajectories(t_curr: int, show_lines: bool, line_width: float):
-        """
-        Calculates and updates the trajectory lines for the current timestep.
-        """
+    def update_trajectories(t_curr: int, t_prev: int, show_lines: bool, line_width: float):
         line_node.visible = show_lines
         line_node.line_width = line_width
 
-        if not show_lines or t_curr == 0:
+        if not show_lines:
             return
 
-        # Get positions for current and next frame (scaled)
-        # Note: t_curr is used as index for 'prev' because we draw line from t to t+1
-        valid_mask = visibility_mask[t_curr - 1] & visibility_mask[t_curr]
-        prev_positions = 100 * trajectories_3d[t_curr - 1][valid_mask] 
-        
-        # Ensure we don't go out of bounds
-        if t_curr >= trajectories_3d.shape[0]:
+        # Clear historical trajectories if the timeline loops back to the start
+        if t_curr == 0 and t_prev != 0:
+            live_history_pos.clear()
+            live_history_col.clear()
+            live_history_ind.clear()
+            line_node.points = np.zeros((0, 2, 3))
             return
+
+        current_active_indices = np.array([], dtype=int)
+
+        if t_curr > 0 and t_curr < trajectories_3d.shape[0]:
+            pos_curr = 100 * trajectories_3d[t_curr - 1]
+            pos_next = 100 * trajectories_3d[t_curr]
             
-        curr_positions = 100 * trajectories_3d[t_curr][valid_mask]
-        
-        if prev_positions.shape[0] == 0:
-            return
+            # Get the visibility mask of the current frame
+            valid_mask = visibility_mask[t_curr - 1] & visibility_mask[t_curr]
+            
+            if np.any(valid_mask):
+                all_indices = np.arange(N)
+                
+                p1 = pos_curr[valid_mask]
+                p2 = pos_next[valid_mask]
+                curr_inds = all_indices[valid_mask]
+                
+                # Filter abnormal jumps (teleportation artifacts)
+                dist = np.linalg.norm(p2 - p1, axis=1)
+                jump_mask = dist < gui_max_displacement.value
+                
+                if np.any(jump_mask):
+                    final_p1 = p1[jump_mask]
+                    final_p2 = p2[jump_mask]
+                    segments = np.stack([final_p1, final_p2], axis=1)
+                    
+                    cols = initial_colors[valid_mask][jump_mask]
+                    segment_colors = np.stack([cols, cols], axis=1)
+                    final_indices = curr_inds[jump_mask]
+                    
+                    # Store in history
+                    live_history_pos.append(segments)
+                    live_history_col.append(segment_colors)
+                    live_history_ind.append(final_indices)
+                    
+                    current_active_indices = final_indices
 
-        # Prepare colors
-        new_colors = np.repeat(initial_colors[valid_mask][:, None, :], 2, axis=1)
-
-        # Filter out large jumps (teleportation artifacts)
-        displacement = np.linalg.norm(curr_positions - prev_positions, axis=1)
-        valid_mask = displacement < gui_max_displacement.value
-        
-        prev_positions = prev_positions[valid_mask]
-        curr_positions = curr_positions[valid_mask]
-        new_colors = new_colors[valid_mask]
-
-        if prev_positions.shape[0] == 0:
-            return
-
-        # Create new line segments
-        new_lines = np.stack([prev_positions, curr_positions], axis=1)
-        all_line_positions.append(new_lines)
-        all_line_colors.append(new_colors)
-
-        # Trim history to max length
+        # Maintain maximum tail length
         max_len = int(gui_max_traj_length.value)
-        if len(all_line_positions) > max_len:
-            all_line_positions.pop(0)
-            all_line_colors.pop(0)
+        while len(live_history_pos) > max_len:
+            live_history_pos.pop(0)
+            live_history_col.pop(0)
+            live_history_ind.pop(0)
 
-        # Flatten and update Viser node
-        full_lines = np.concatenate(all_line_positions, axis=0)
-        full_colors = np.concatenate(all_line_colors, axis=0)
+        # Rendering logic: only show the history of trajectories that are [currently alive], and add fading trail effect
+        if live_history_pos and len(current_active_indices) > 0:
+            active_lookup = np.zeros(N, dtype=bool)
+            active_lookup[current_active_indices] = True
+            
+            render_pos_list = []
+            render_col_list = []
+            
+            for i, (h_pos, h_col, h_ind) in enumerate(zip(live_history_pos, live_history_col, live_history_ind)):
+                keep_mask = active_lookup[h_ind]
+                
+                if np.any(keep_mask):
+                    
+                    rgb_cols = h_col[keep_mask]
+                    render_pos_list.append(h_pos[keep_mask])
+                    render_col_list.append(rgb_cols)
+            
+            if render_pos_list:
+                line_node.points = np.concatenate(render_pos_list, axis=0)
+                line_node.colors = np.concatenate(render_col_list, axis=0)
+            else:
+                line_node.points = np.zeros((0, 2, 3))
+        else:
+            line_node.points = np.zeros((0, 2, 3))
 
-        line_node.points = full_lines
-        line_node.colors = full_colors
-
-    # Initial trajectory update
-    update_trajectories(gui_timestep.value, gui_show_trajectories.value, gui_line_width.value)
+    # Initialize the first call
+    update_trajectories(gui_timestep.value, -1, gui_show_trajectories.value, gui_line_width.value)
 
     # --- Main Loop ---
     prev_timestep = gui_timestep.value
@@ -614,22 +533,25 @@ def main(
 
         # 2. Reset history if looping back to start
         if current_timestep == 0:
-            all_line_positions = []
-            all_line_colors = []
+            live_history_pos.clear()
+            live_history_col.clear()
+            live_history_ind.clear()
 
         # 3. Handle Downsample Rate Change
         if gui_downsample.value != current_downsample:
             current_downsample = gui_downsample.value
             print(f"[Downsample] Updating rate to: 1/{current_downsample}")
             
-            # Re-slice data
             trajectories_3d = trajectory_all_raw[:, ::current_downsample]
             visibility_mask = (~np.isnan(trajectory_all_raw).any(axis=-1))[:, ::current_downsample]
             
-            # Re-calculate colors for new subset
             N = trajectories_3d.shape[1]
-            all_line_positions = []
-            all_line_colors = []
+            
+            # Clear cache
+            live_history_pos.clear()
+            live_history_col.clear()
+            live_history_ind.clear()
+            line_node.points = np.zeros((0, 2, 3))
             
             first_visible_idx = np.argmax(visibility_mask, axis=0)
             never_visible = ~np.any(visibility_mask, axis=0)
@@ -657,7 +579,6 @@ def main(
 
         # 5. Update Frame Visibility & Trajectories
         if current_timestep != prev_timestep:
-            # Toggle point cloud visibility
             if gui_vis_mode.value in ("PointCloud", "Both"):
                 point_nodes[prev_timestep].visible = False
                 point_nodes[current_timestep].visible = True
@@ -665,18 +586,16 @@ def main(
                 point_nodes[prev_timestep].visible = False
                 point_nodes[current_timestep].visible = False
 
-            # Update trajectory lines (only if mode includes Tracking)
             if gui_vis_mode.value in ("Tracking", "Both"):
-                update_trajectories(current_timestep, True, gui_line_width.value)
+                update_trajectories(current_timestep, prev_timestep, True, gui_line_width.value)
             
             prev_timestep = current_timestep
 
-        # 6. Handle Mode Change (Fallback check)
+        # 6. Handle Mode Change
         if gui_vis_mode.value != last_vis_mode:
             apply_vis_mode(gui_vis_mode.value, current_timestep)
             last_vis_mode = gui_vis_mode.value
 
-        # Sleep to maintain framerate
         time.sleep(1.0 / gui_framerate.value)
 
 if __name__ == "__main__":
