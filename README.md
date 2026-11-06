@@ -14,7 +14,7 @@
   <a href="https://liuyuan-pal.github.io/">Yuan Liu</a><sup>1†</sup>
   <br>
   <sup>1</sup> HKUST </span> 
-  <sup>2</sup> ARC Lab, Tencent PCG </span>
+  <sup>2</sup> ARC Lab, Tencent </span>
   <br>
   <b>ECCV 2026</b>
 </p>
